@@ -1,0 +1,25 @@
+{
+  "name": "cloudlabs-ops-dashboard",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "test:e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "next": "15.5.29",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "playwright": "^1.65.1",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  }
+}

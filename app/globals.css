@@ -1,0 +1,552 @@
+@import "tailwindcss";
+
+/* CloudLabs Workshop Ops tokens.
+   Rules: two surfaces (page, surface), one hairline, ink for data,
+   color only for status. Every contrast ratio below is measured on #fff. */
+
+:root {
+  /* Neutral scale, 10 steps, cool gray */
+  --gray-2: #f5f6f8;
+  --gray-3: #eef0f3;
+  --gray-4: #e4e7eb;
+  --gray-5: #d6dae0;
+  --gray-6: #b9bfc8;
+  --gray-7: #8a919c; /* 3.2:1, minimum for input boundaries (WCAG 1.4.11) */
+  --gray-8: #5f6672; /* 5.8:1 on white, 5.4:1 on page */
+  --gray-9: #3f4651; /* 9.6:1 */
+  --gray-10: #16181d;
+
+  /* Semantic neutrals (names referenced by components, keep) */
+  --ink: var(--gray-10);
+  --ink-2: var(--gray-9);
+  --muted: var(--gray-8);
+  --line: var(--gray-4);
+  --line-strong: var(--gray-7);
+  --page: var(--gray-2);
+  --surface: #ffffff;
+
+  /* Status palette. Only failed and stuck are warm. */
+  --failed: #b42318;       /* 6.6:1 */
+  --failed-bg: #fef3f2;
+  --failed-row: #fffbfa;
+
+  --failed-line: #f4b8b1;
+  --failed-flash: #fcdcd7;
+  --stuck: #b54708;        /* 5.4:1 */
+  --stuck-flash: #fdeac2;
+  --ok: #067647;           /* 5.7:1 */
+  --ok-bg: #ecfdf3;
+  --info: #175cd3;         /* 6.0:1 */
+  --info-bg: #eff4ff;
+  --flash: #e3ebfc;        /* neutral "changed" tint, never amber */
+  --focus: var(--info);
+
+  /* Rhythm: 4px base, dense table cells */
+  --cell-x: 12px;
+  --cell-y: 6px;
+  --row-min: 32px;
+  --head-h: 32px;
+  --console-chrome: 200px; /* header + filter bars + gutters; tune once */
+
+  /* Elevation: hairline drawn once as a shadow, translucent */
+  --shadow-hairline: 0 0 0 1px rgb(22 24 29 / 0.08), 0 1px 2px rgb(22 24 29 / 0.04);
+}
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI Variable Text", "Segoe UI", "Inter", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "Cascadia Mono", "Segoe UI Mono",
+    "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace;
+
+  /* Type scale: 11 / 12 / 13 / 15 / 20 */
+  --text-micro: 11px;
+  --text-micro--line-height: 16px;
+
+  --text-dense: 12px;
+  --text-dense--line-height: 16px;
+  --text-body: 13px;
+  --text-body--line-height: 20px;
+  --text-title: 15px;
+  --text-title--line-height: 20px;
+  --text-title--letter-spacing: -0.01em;
+  --text-metric: 20px;
+  --text-metric--line-height: 24px;
+  --text-metric--letter-spacing: -0.02em;
+
+  --radius-control: 4px;
+  --radius-surface: 6px;
+}
+
+@theme inline {
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-page: var(--page);
+  --color-surface: var(--surface);
+  --color-failed: var(--failed);
+  --color-failed-bg: var(--failed-bg);
+  --color-stuck: var(--stuck);
+  --color-ok: var(--ok);
+  --color-info: var(--info);
+  --color-info-bg: var(--info-bg);
+}
+
+@layer base {
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  html,
+  body {
+    background: var(--page);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    line-height: 20px;
+  }
+  ::selection {
+    background: var(--info-bg);
+    color: var(--ink);
+  }
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
+@layer components {
+  /* Surfaces */
+  .surface {
+    background: var(--surface);
+    border-radius: var(--radius-surface);
+    box-shadow: var(--shadow-hairline);
+  }
+
+  /* Mono micro label: headers, metric captions, column heads */
+  .label {
+
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: var(--text-micro--line-height);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .kbd,
+  .kbd-hint::after {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 20px;
+    height: 20px;
+    padding: 0 4px;
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: 1;
+    color: var(--ink-2);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-bottom-color: var(--gray-5);
+    border-radius: var(--radius-control);
+  }
+  /* Visual-only key hint: content via CSS so it adds no DOM text */
+  .kbd-hint::after {
+    content: attr(data-key);
+  }
+
+  /* Controls: inputs carry 3:1 boundaries, buttons carry text */
+
+  .control {
+    height: 28px;
+    padding: 0 8px;
+    font-size: 12px;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-control);
+  }
+  .control::placeholder {
+    color: var(--muted);
+  }
+  .control:hover {
+    border-color: var(--gray-8);
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 10px;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    color: var(--ink);
+    background: var(--surface);
+    border: 1px solid var(--gray-5);
+    border-radius: var(--radius-control);
+  }
+
+  .btn:hover:not(:disabled) {
+    background: var(--gray-2);
+  }
+  .btn-sm {
+    height: 24px;
+    padding: 0 8px;
+    font-size: 11px;
+  }
+  .btn-primary {
+    color: #fff;
+    background: var(--ink);
+    border-color: var(--ink);
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: var(--gray-9);
+  }
+  .btn-danger {
+    color: var(--failed);
+    border-color: var(--failed-line);
+  }
+  .btn-danger:hover:not(:disabled) {
+    background: var(--failed-bg);
+  }
+  .btn:disabled {
+    color: var(--gray-7);
+    background: var(--gray-2);
+    border-color: var(--gray-5);
+  }
+
+  /* Status: one variable per state, consumed by glyph, text, meter, histogram */
+  [data-st="failed"] { --st: var(--failed); }
+  [data-st="stuck"] { --st: var(--stuck); }
+
+  [data-st="in_use"] { --st: var(--gray-8); }
+  [data-st="provisioning"] { --st: var(--info); }
+  [data-st="ready"] { --st: var(--ok); }
+  [data-st="deprovisioned"] { --st: var(--muted); }
+
+  .status {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .status-text {
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: var(--text-micro--line-height);
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--st, var(--ink-2));
+  }
+
+  /* Shape-coded glyphs: status readable without color */
+  .glyph {
+    flex: none;
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    background: var(--st, var(--muted));
+  }
+  [data-st="failed"] > .glyph { border-radius: 0; }                    /* solid square */
+  [data-st="stuck"] > .glyph {                                          /* triangle */
+    width: 10px;
+    height: 9px;
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+  }
+
+  [data-st="in_use"] > .glyph { border-radius: 50%; }                  /* solid dot */
+  [data-st="ready"] > .glyph {                                          /* ring */
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: transparent;
+    box-shadow: inset 0 0 0 1.5px var(--st);
+  }
+  [data-st="provisioning"] > .glyph {                                   /* hollow diamond */
+    width: 7px;
+    height: 7px;
+    transform: rotate(45deg);
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--st);
+  }
+  [data-st="deprovisioned"] > .glyph {                                  /* dash */
+    height: 2px;
+    border-radius: 1px;
+  }
+
+  /* Filter chips */
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 8px;
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: var(--ink-2);
+    background: var(--surface);
+    border: 1px solid var(--gray-5);
+    border-radius: var(--radius-control);
+  }
+  .chip:hover {
+
+    background: var(--gray-2);
+  }
+  .chip[aria-pressed="true"] {
+    color: #fff;
+    background: var(--ink);
+    border-color: var(--ink);
+  }
+  .chip[aria-pressed="true"] > .glyph {
+    --st: #fff;
+  }
+  /* Count badge: quieter than the label but never below 4.5:1 in either state */
+  .chip-count {
+    color: var(--muted);
+  }
+  .chip[aria-pressed="true"] .chip-count {
+    color: rgb(255 255 255 / 0.8);
+  }
+
+  /* Session rail */
+  .rail-value {
+    font-size: 15px;
+    line-height: 20px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--st, var(--ink));
+  }
+
+  /* State histogram: flex-grow by count, 1px gaps separate segments */
+  .hist {
+    display: flex;
+    gap: 1px;
+    height: 8px;
+    overflow: hidden;
+    padding: 1px;
+    background: var(--surface);
+    border-radius: 2px;
+    box-shadow: var(--shadow-hairline);
+  }
+  .hist-seg {
+    flex-basis: 0;
+    min-width: 2px;
+    background: var(--st);
+
+  }
+  .hist-seg[data-st="deprovisioned"] { background: var(--gray-6); }
+
+  /* Progress meter: neutral by default, status only when it matters */
+  .meter {
+    flex: none;
+    width: 96px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 2px;
+    background: var(--gray-4);
+  }
+  .meter-fill {
+    height: 100%;
+    background: var(--gray-8);
+  }
+  [data-st="failed"] .meter-fill { background: var(--failed); }
+  [data-st="stuck"] .meter-fill { background: var(--stuck); }
+  [data-st="deprovisioned"] .meter-fill { background: var(--gray-6); }
+
+  /* Table: its own scroll container so the header can stick */
+  .ops-scroll {
+    overflow: auto;
+    overscroll-behavior: contain;
+    max-height: 70dvh;
+    min-height: 320px;
+  }
+  @media (min-width: 64rem) {
+    .ops-scroll {
+      max-height: calc(100dvh - var(--console-chrome));
+    }
+
+  }
+
+  .ops-table {
+    width: 100%;
+    min-width: 780px;
+    table-layout: fixed;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 12px;
+    line-height: 16px;
+  }
+  .ops-table th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    height: var(--head-h);
+    padding: 0 var(--cell-x);
+    text-align: left;
+    vertical-align: middle;
+    background: var(--surface);
+    box-shadow: inset 0 -1px 0 var(--line);
+    font-family: var(--font-mono);
+    font-size: var(--text-micro);
+    line-height: var(--text-micro--line-height);
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .ops-table td {
+    height: var(--row-min);
+    padding: var(--cell-y) var(--cell-x);
+    vertical-align: middle;
+
+    border-bottom: 1px solid var(--line);
+  }
+  .ops-table tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .ops-table tbody tr {
+    cursor: pointer;
+    scroll-margin-top: calc(var(--head-h) + 4px);
+    scroll-margin-bottom: 4px;
+  }
+  .ops-table tbody tr[data-st="failed"] {
+    background: var(--failed-row);
+  }
+  .ops-table tbody tr:hover {
+    background: var(--gray-2);
+  }
+  .ops-table tbody tr[data-selected="true"] {
+    background: var(--info-bg);
+  }
+  /* Full-height rail: the scan signal for 120 rows */
+  .ops-table tbody tr[data-st="failed"] > td:first-child {
+    box-shadow: inset 3px 0 0 var(--failed);
+  }
+  .ops-table tbody tr[data-st="stuck"] > td:first-child {
+    box-shadow: inset 3px 0 0 var(--stuck);
+  }
+
+  .cell-num {
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dash {
+    color: var(--gray-7);
+  }
+  .row-reason {
+    margin-top: 2px;
+    overflow: hidden;
+    font-size: var(--text-micro);
+    line-height: var(--text-micro--line-height);
+    color: var(--failed);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .skeleton {
+    height: 8px;
+    border-radius: 2px;
+    background: var(--gray-3);
+  }
+
+  /* Liveness: color plus shape (dot vs square) */
+  .live {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--ok);
+  }
+  .live-dot {
+    width: 6px;
+
+    height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+  .live[data-stale="true"] {
+    color: var(--stuck);
+  }
+  .live[data-stale="true"] .live-dot {
+    border-radius: 0;
+  }
+
+  /* Inline notices */
+  .banner-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 8px 12px;
+    font-size: 12px;
+    color: var(--failed);
+    background: var(--failed-bg);
+    border: 1px solid var(--failed-line);
+    border-radius: var(--radius-control);
+  }
+  .note-info,
+  .note-warn {
+    padding-left: 8px;
+    font-size: 12px;
+    border-left: 2px solid var(--info);
+  }
+  .note-warn {
+    color: var(--stuck);
+
+    border-left-color: var(--stuck);
+  }
+}
+
+/* Unlayered on purpose: utilities such as outline-none cannot remove these. */
+
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+.ops-table tbody tr:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Motion only to signal a state change between polls.
+   Only "from" is defined, so the row eases back to its own background
+   (failed tint, hover, selected) instead of snapping through transparent. */
+@keyframes rowflash {
+  from {
+    background-color: var(--flash-from, var(--flash));
+  }
+}
+.row-flash {
+  animation: rowflash 900ms cubic-bezier(0.2, 0, 0, 1) 1;
+}
+tr[data-st="failed"].row-flash {
+  --flash-from: var(--failed-flash);
+
+}
+tr[data-st="stuck"].row-flash {
+  --flash-from: var(--stuck-flash);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep the signal, drop the movement: hold the tint, then cut. */
+  .row-flash {
+    animation-timing-function: steps(1, end);
+  }
+}
