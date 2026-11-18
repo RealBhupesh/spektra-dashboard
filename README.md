@@ -73,11 +73,14 @@ npm run dev
 
 The local path honors only loopback/private-network endpoints, so a hosted
 base URL set through `LLM_BASE_URL` is ignored rather than silently sending
-instructor queries to an unvetted third party. The hosted demo uses Groq's
-free tier (openai/gpt-oss-120b); the key lives only as a server-side env
-var, and per-model free-tier limits (1000 requests/min at the time of
-writing) sit far above any dashboard traffic. Neither path is required:
-unset them and everything still works offline.
+instructor queries to an unvetted third party. The hosted demo currently
+ships with the model tier disabled (no key set): the NL filter runs on the
+offline compiler, which is the brief's required degraded mode, and setting
+`GROQ_API_KEY` (free tier, openai/gpt-oss-120b) turns the model tier back
+on with no code change. The key lives only as a server-side env var, and
+per-model free-tier limits (1000 requests/min at the time of writing) sit
+far above any dashboard traffic. Neither path is required: unset them and
+everything still works offline.
 
 Model quality caveat, from testing both sizes: a 0.5B local model is often
 confidently off-topic, which the intent cross-check below catches by
