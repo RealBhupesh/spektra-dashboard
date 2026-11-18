@@ -159,11 +159,12 @@ most" spend sort, and the empty state.
 
 ## Demo recording
 
-`recordings/demo-75s.mp4` - 75 seconds under live load: the dense 120-row
-table drifting with the stuck cohort visible, the offline-compiled
-"stuck over 20 minutes" filter returning the 22 stuck environments, the
-FAILED chip, a reprovision reflected on the next poll, and the "who is
-costing the most" spend sort. Re-record with
+`recordings/demo-75s.mp4` - about 75 seconds under live load on the hosted
+deployment: the dense 120-row table drifting with the stuck cohort
+visible, the offline-compiled "stuck over 20 minutes" filter returning the
+stuck environments, the More filters panel driven manually, the FAILED
+chip, a reprovision reflected on the next poll, and the "who is costing
+the most" spend sort. Re-record with
 `node scripts/record-demo.mjs` against a running server.
 
 ## Hosted demo

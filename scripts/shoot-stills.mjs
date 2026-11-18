@@ -44,6 +44,16 @@ await page.screenshot({ path: "screenshots/shot-16-redesign-spend-sort.png" });
 await page.selectOption("select", "risk");
 await wait(500);
 
+// Advanced "More filters" panel, with one control engaged
+await page.click('button:has-text("More filters")');
+await wait(400);
+await page.click('label:has-text("Stuck 20m+ only")');
+await wait(1200);
+await page.screenshot({ path: "screenshots/shot-18-redesign-more-filters.png" });
+await page.click('button:has-text("Reset")');
+await page.click('button:has-text("More filters")');
+await wait(600);
+
 // Empty state
 await page.fill('input[placeholder="Search learner"]', "nobody-by-this-name");
 await wait(1000);

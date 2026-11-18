@@ -20,7 +20,7 @@ const wait = (ms) => page.waitForTimeout(ms);
 // 1. Dense live view, drifting (0-20s)
 await page.goto(BASE, { waitUntil: "networkidle" });
 await page.waitForSelector("tbody tr", { timeout: 15000 });
-await wait(22000);
+await wait(16000);
 
 // 2. NL filter (20-35s). "stuck over 20 minutes" matches the seeded stuck
 // cohort (lib/seed.ts pre-ages ~22% of in-use envs 20-65 min into a step),
@@ -28,24 +28,34 @@ await wait(22000);
 await page.fill('input[aria-label="Natural language filter"]', "everyone stuck over 20 minutes");
 await page.keyboard.press("Enter");
 await page.waitForSelector("text=Filter:", { timeout: 8000 });
-await wait(14000);
+await wait(11000);
 await page.click("text=Clear filter");
-await wait(3000);
+await wait(2000);
 
-// 3. Failed-only via manual chip, then reprovision the top failure (35-60s)
+// 3. Manual advanced filters via the More filters panel (~30-38s)
+await page.click('button:has-text("More filters")');
+await wait(500);
+await page.click('label:has-text("Stuck 20m+ only")');
+await wait(5000);
+await page.click('button:has-text("Reset")');
+await wait(1000);
+await page.click('button:has-text("More filters")');
+await wait(1000);
+
+// 4. Failed-only via manual chip, then reprovision the top failure (38-62s)
 await page.click('button:has-text("FAILED")');
-await wait(6000);
+await wait(5000);
 const first = page.locator("tbody tr:first-child");
 await first.locator("text=Reprovision").click();
-await wait(14000);
+await wait(12000);
 await page.click('button:has-text("FAILED")');
 await wait(2000);
 
-// 4. Superlative spend sort, then back to live view (60-75s)
+// 5. Superlative spend sort, then back to live view (62-75s)
 await page.fill('input[aria-label="Natural language filter"]', "who is costing the most");
 await page.keyboard.press("Enter");
 await page.waitForSelector("text=Filter:", { timeout: 8000 });
-await wait(10000);
+await wait(8000);
 await page.click("text=Clear filter");
 await wait(3000);
 
