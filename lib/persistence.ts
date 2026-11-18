@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { put, list } from "@vercel/blob";
 import { ReprovisionEvent } from "./replay";
 
@@ -23,6 +24,12 @@ const BLOB_PATH = "cloudlabs-ops/state.json";
 let mem: Persisted | null = null;
 let cache: { at: number; value: Persisted | null } = { at: 0, value: null };
 const CACHE_TTL_MS = 15_000;
+
+// Generated once per serverless process. Runtime logs carry it so we can
+// prove a request was served by a DIFFERENT process that re-read the log
+// from Blob (a real cold start), not from this process's own memory.
+const INSTANCE_ID = randomUUID().slice(0, 8);
+const slog = (msg: string) => console.log(`[persistence] instance=${INSTANCE_ID} ${msg}`);
 
 function readFileStore(): Persisted | null {
   try {
@@ -90,15 +97,23 @@ async function writeBlobStore(p: Persisted) {
 const useBlob = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
 export async function loadPersisted(): Promise<Persisted | null> {
-  if (mem) return mem;
+  if (mem) {
+    slog(`source=mem logLen=${mem.reprovisionLog.length}`);
+    return mem;
+  }
   if (useBlob()) {
-    if (cache.value && Date.now() - cache.at < CACHE_TTL_MS) return cache.value;
+    if (cache.value && Date.now() - cache.at < CACHE_TTL_MS) {
+      slog(`source=cache logLen=${cache.value.reprovisionLog.length}`);
+      return cache.value;
+    }
     const v = await readBlobStore();
     cache = { at: Date.now(), value: v };
     mem = v ?? mem;
+    slog(`source=blob logLen=${v ? v.reprovisionLog.length : "none"}`);
     return v;
   }
   mem = readFileStore();
+  slog(`source=file logLen=${mem ? mem.reprovisionLog.length : "none"}`);
   return mem;
 }
 
@@ -107,9 +122,11 @@ export async function savePersisted(p: Persisted) {
   if (useBlob()) {
     cache = { at: Date.now(), value: p };
     await writeBlobStore(p);
+    slog(`wrote=blob logLen=${p.reprovisionLog.length}`);
     return;
   }
   writeFileStore(p);
+  slog(`wrote=file logLen=${p.reprovisionLog.length}`);
 }
 
 // Test hook: drop the in-memory copy so the next load re-reads the backend.
