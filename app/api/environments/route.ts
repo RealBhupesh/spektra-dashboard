@@ -87,6 +87,16 @@ export async function GET(req: NextRequest) {
     }
     prevSnapshot = cur;
 
+    const enrich = (e: (typeof all)[number]) => ({
+      ...e,
+      spendUsd: Math.round(spendUsd(e) * 100) / 100,
+      progressPct: progressPct(e),
+      // Floor, never round up: a learner at 19.96 min is not yet stuck and
+      // must not display as "20m".
+      onStepMinutes: Math.floor(onStepMinutes(e, now) * 10) / 10,
+      stuck: isStuck(e, now),
+    });
+
     return NextResponse.json({
       now,
       total: all.length,
@@ -95,15 +105,10 @@ export async function GET(req: NextRequest) {
       summary,
       steps,
       transitions: transitions.slice(0, 12),
-      environments: filtered.map((e) => ({
-        ...e,
-        spendUsd: Math.round(spendUsd(e) * 100) / 100,
-        progressPct: progressPct(e),
-        // Floor, never round up: a learner at 19.96 min is not yet stuck and
-        // must not display as "20m".
-        onStepMinutes: Math.floor(onStepMinutes(e, now) * 10) / 10,
-        stuck: isStuck(e, now),
-      })),
+      environments: filtered.map(enrich),
+      // The floor map draws every seat and dims the ones the filter excludes,
+      // so it needs the whole room from the same snapshot (opt-in).
+      ...(req.nextUrl.searchParams.get("include") === "all" ? { everyone: all.map(enrich) } : {}),
     });
   } catch (err) {
     // A cold instance that cannot read the store must fail visibly instead

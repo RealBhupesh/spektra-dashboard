@@ -1,246 +1,199 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { LAB_STEPS } from "@/lib/seed";
+import { type EnvRow, type EnvState, fmtMin, fmtUsd, seatOf } from "./ui";
 
-type EnvState = "provisioning" | "ready" | "in_use" | "failed" | "deprovisioned";
-
-interface EnvRow {
-  id: string;
-  learnerName: string;
-  state: EnvState;
-  step: number;
-  totalSteps: number;
-  failureReason: string | null;
-  spendUsd: number;
-  progressPct: number;
-  onStepMinutes: number;
-  stuck: boolean;
-}
-
-interface Summary {
-  total: number;
-  active: number;
-  failures: number;
-  avgCompletionPct: number;
-  estimatedSpend: number;
-  byState: Record<EnvState, number>;
-  stuckCount: number;
-}
-
-const STATE_META: Record<EnvState, { label: string; color: string }> = {
-  failed: { label: "Failed", color: "var(--failed)" },
-  in_use: { label: "In use", color: "#5b6472" },
-  provisioning: { label: "Provisioning", color: "var(--info)" },
-  ready: { label: "Ready", color: "var(--ok)" },
-  deprovisioned: { label: "Done", color: "#c9ced6" },
-};
-
-const RING_ORDER: EnvState[] = ["failed", "in_use", "provisioning", "ready", "deprovisioned"];
-
-/* ------------------------------------------------------------------ */
-/* Session health: state ring + the four numbers an instructor scans   */
-/* ------------------------------------------------------------------ */
-
-export function SessionHealth({
-  summary,
-  stateFilter,
-  onToggleState,
+/* Needs attention: the instructor's to-do list, failures first. */
+export function AttentionQueue({
+  everyone,
+  selectedId,
+  onSelect,
+  onReprovision,
+  pending,
 }: {
-  summary: Summary | null;
-  stateFilter: EnvState[];
-  onToggleState: (s: EnvState) => void;
+  everyone: EnvRow[];
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+  onReprovision: (id: string) => void;
+  pending: Set<string>;
 }) {
-  const R = 62;
-  const C = 2 * Math.PI * R;
-  const total = summary?.total ?? 0;
-
-  // Build arc segments with 2px gaps between non-trivial slices.
-  const segs = useMemo(() => {
-    if (!summary || total === 0) return [];
-    let acc = 0;
-    return RING_ORDER.filter((s) => summary.byState[s] > 0).map((s) => {
-      const frac = summary.byState[s] / total;
-      const start = acc;
-      acc += frac;
-      return { s, frac, start, n: summary.byState[s] };
-    });
-  }, [summary, total]);
+  const items = useMemo(() => {
+    const failed = everyone.filter((r) => r.state === "failed").sort((a, b) => b.onStepMinutes - a.onStepMinutes);
+    const stuck = everyone.filter((r) => r.stuck).sort((a, b) => b.onStepMinutes - a.onStepMinutes);
+    return [...failed, ...stuck];
+  }, [everyone]);
+  const nFailed = items.filter((r) => r.state === "failed").length;
 
   return (
-    <section className="surface flex flex-col p-4" aria-label="Session health">
-      <div className="flex items-center gap-4">
-        <div className="relative shrink-0">
-          <svg width="148" height="148" viewBox="0 0 148 148" role="img" aria-label="Environment states">
-            <circle cx="74" cy="74" r={R} fill="none" stroke="var(--gray-2)" strokeWidth="14" />
-            {segs.map(({ s, frac, start }) => {
-              const len = Math.max(frac * C - 2.5, frac > 0 ? 2 : 0);
-              const on = stateFilter.length === 0 || stateFilter.includes(s);
-              return (
-                <circle
-                  key={s}
-                  cx="74"
-                  cy="74"
-                  r={R}
-                  fill="none"
-                  stroke={STATE_META[s].color}
-                  strokeWidth={stateFilter.includes(s) ? 18 : 14}
-                  strokeDasharray={`${len} ${C - len}`}
-                  strokeDashoffset={-start * C + C / 4}
-                  strokeLinecap="butt"
-                  opacity={on ? 1 : 0.18}
-                  style={{ cursor: "pointer", transition: "opacity 150ms, stroke-width 150ms" }}
-                  onClick={() => onToggleState(s)}
-                >
-                  <title>
-                    {STATE_META[s].label}: {summary!.byState[s]} - click to filter
-                  </title>
-                </circle>
-              );
-            })}
-          </svg>
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
-            <span
-              className="tnum text-[30px] font-semibold leading-8"
-              style={{ color: summary && summary.failures > 0 ? "var(--failed)" : "var(--ink)" }}
-            >
-              {summary ? summary.failures : "-"}
-            </span>
-            <span className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted">failed</span>
-            <span className="tnum mt-0.5 text-[10px] text-muted">of {summary?.total ?? "-"}</span>
-          </div>
-        </div>
-
-        <dl className="grid min-w-0 flex-1 grid-cols-2 gap-x-3 gap-y-2.5">
-          {(
-            [
-              ["Active", summary ? `${summary.active}/${summary.total}` : "-", undefined],
-              ["Stuck 20m+", summary ? String(summary.stuckCount) : "-", summary && summary.stuckCount > 0 ? "var(--warn)" : undefined],
-              ["Avg done", summary ? `${summary.avgCompletionPct}%` : "-", undefined],
-              ["Est. spend", summary ? `$${summary.estimatedSpend.toFixed(2)}` : "-", undefined],
-            ] as const
-          ).map(([k, v, c]) => (
-            <div key={k}>
-              <dt className="whitespace-nowrap text-[10px] font-medium uppercase tracking-[0.06em] text-muted">{k}</dt>
-              <dd className="tnum text-[16px] font-semibold leading-5" style={c ? { color: c } : undefined}>
-                {v}
-              </dd>
-            </div>
-          ))}
-        </dl>
+    <section className="panel flex min-h-0 flex-col" aria-label="Needs attention">
+      <div className="panel-head">
+        <h2 className="panel-title">Needs attention</h2>
+        <span className="panel-meta tnum">
+          {nFailed} failed, {items.length - nFailed} stuck
+        </span>
       </div>
-
-      <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 border-t border-line pt-2.5">
-        {RING_ORDER.map((s) => {
-          const n = summary?.byState[s] ?? 0;
-          if (n === 0) return null;
-          const on = stateFilter.includes(s);
-          return (
-            <button
-              key={s}
-              onClick={() => onToggleState(s)}
-              aria-pressed={on}
-              className="flex items-center gap-1.5 text-[11px]"
-            >
-              <span
-                aria-hidden
-                className="inline-block size-2 rounded-full"
-                style={{ background: STATE_META[s].color, opacity: stateFilter.length === 0 || on ? 1 : 0.3 }}
-              />
-              <span className="text-ink-2">{STATE_META[s].label}</span>
-              <span className="tnum font-medium text-ink">{n}</span>
-            </button>
-          );
-        })}
-      </div>
+      {items.length === 0 ? (
+        <p className="border-t border-line px-4 py-6 text-[12.5px] text-muted">Nobody needs help right now.</p>
+      ) : (
+        <ul className="overflow-y-auto" style={{ maxHeight: 400 }}>
+          {items.map((r) => {
+            const failed = r.state === "failed";
+            return (
+              <li key={r.id} className="li-row !py-0" data-selected={selectedId === r.id || undefined}>
+                <button className="flex min-w-0 flex-1 items-center gap-3 py-2.5 text-left" onClick={() => onSelect(r.id)}>
+                  <span className="seat-ref">{seatOf(r.id)}</span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] text-ink">{r.learnerName}</span>
+                    <span className={`block truncate text-[12px] ${failed ? "text-failed" : "text-muted"}`}>
+                      {failed ? r.failureReason ?? "Environment failed" : `Step ${r.step}, ${LAB_STEPS[r.step - 1] ?? ""}`}
+                    </span>
+                  </span>
+                </button>
+                {failed ? (
+                  <button
+                    className="btn btn-sm btn-danger"
+                    disabled={pending.has(r.id)}
+                    onClick={() => onReprovision(r.id)}
+                    aria-label={`Fix ${r.learnerName}'s PC by reprovisioning it`}
+                  >
+                    {pending.has(r.id) ? "Working…" : "Fix"}
+                  </button>
+                ) : (
+                  <span className="tnum shrink-0 text-[12.5px] font-medium text-stuck">{fmtMin(r.onStepMinutes)}</span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </section>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Step heatmap: where the cohort sits, where it burns time            */
-/* ------------------------------------------------------------------ */
-
-export interface StepBucket {
-  step: number;
-  count: number;
-  failed: number;
-  done: number;
-  stuck: number;
-  maxOnStep: number;
-}
-
-export function StepHeatmap({
-  steps,
+/* Where the class is: not started → each step → finished. */
+export function StepFunnel({
+  everyone,
   activeStep,
   onSelectStep,
 }: {
-  steps: StepBucket[];
+  everyone: EnvRow[];
   activeStep: number | null;
   onSelectStep: (step: number | null) => void;
 }) {
-  const maxCount = Math.max(1, ...steps.map((s) => s.count));
-  // Heat = longest anyone has sat on that step, capped at 90 min.
-  const maxHeat = Math.max(30, ...steps.map((s) => s.maxOnStep));
+  const total = everyone[0]?.totalSteps ?? 12;
+  const { cols, notStarted, finished, max } = useMemo(() => {
+    const cols = Array.from({ length: total }, (_, i) => ({ step: i + 1, working: 0, stuck: 0, failed: 0 }));
+    let notStarted = 0;
+    let finished = 0;
+    for (const r of everyone) {
+      if (r.state === "deprovisioned") finished++;
+      else if (r.state === "ready" || r.state === "provisioning" || r.step < 1) notStarted++;
+      else {
+        const c = cols[Math.min(r.step, total) - 1];
+        if (r.state === "failed") c.failed++;
+        else if (r.stuck) c.stuck++;
+        else c.working++;
+      }
+    }
+    return { cols, notStarted, finished, max: Math.max(1, ...cols.map((c) => c.working + c.stuck + c.failed)) };
+  }, [everyone, total]);
 
   return (
-    <section className="surface flex min-w-0 flex-col p-4" aria-label="Cohort by lab step">
-      <div className="mb-3 flex items-baseline justify-between gap-3">
-        <h2 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Cohort by lab step</h2>
-        <span className="hidden text-[10px] text-muted sm:block">bar = learners on step - red failed, gray done, amber active dwell</span>
+    <section className="panel flex min-w-0 flex-col" aria-label="Learners by lab step">
+      <div className="panel-head">
+        <div>
+          <h2 className="panel-title">Learners by step</h2>
+          <p className="panel-meta">Click a step to highlight those seats.</p>
+        </div>
+        <div className="flex items-center gap-3 text-[12px] text-muted">
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="inline-block size-2 rounded-[2px]" style={{ background: "var(--line-strong)" }} /> Working
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="inline-block size-2 rounded-[2px]" style={{ background: "var(--stuck)" }} /> Stuck
+          </span>
+          <span className="flex items-center gap-1.5">
+            <span aria-hidden className="inline-block size-2 rounded-[2px]" style={{ background: "var(--failed)" }} /> Failed
+          </span>
+        </div>
       </div>
-      <div className="flex h-28 items-end gap-[6px]" role="group" aria-label="Steps">
-        {steps.map((s) => {
-          const heat = s.maxOnStep / maxHeat;
-          // Body color: calm gray, amber when someone dwells long.
-          const body = heat > 0.66 ? "#d97706" : heat > 0.4 ? "#e8a33d" : "var(--gray-4)";
-          const on = activeStep === s.step;
-          const dim = activeStep !== null && !on;
-          const totalH = Math.max((s.count / maxCount) * 100, s.count ? 6 : 0);
-          const failedPct = s.count ? (s.failed / s.count) * 100 : 0;
-          const donePct = s.count ? (s.done / s.count) * 100 : 0;
-          return (
-            <button
-              key={s.step}
-              onClick={() => onSelectStep(on ? null : s.step)}
-              aria-pressed={on}
-              className="group flex min-w-0 flex-1 flex-col items-center justify-end gap-1 self-stretch"
-            >
-              <span className="tnum text-[10px] font-medium leading-3" style={{ color: s.count ? "var(--ink)" : "var(--gray-4)" }}>
-                {s.count || ""}
-              </span>
-              <span className="sr-only">
-                {` learners on step ${s.step}${s.failed ? `, ${s.failed} failed` : ""}${s.done ? `, ${s.done} completed` : ""}${s.stuck ? `, ${s.stuck} stuck` : ""}. Click to filter.`}
-              </span>
-              <span
-                aria-hidden
-                className="flex w-full flex-col-reverse overflow-hidden rounded-[3px]"
-                style={{
-                  height: `${totalH}%`,
-                  minHeight: s.count ? 5 : 2,
-                  background: s.count ? undefined : "var(--gray-2)",
-                  opacity: dim ? 0.3 : 1,
-                  outline: on ? "2px solid var(--ink)" : "none",
-                  outlineOffset: 1,
-                  transition: "opacity 150ms",
-                }}
+      <div className="flex items-end gap-4 px-4 pb-4 pt-2">
+        <Tally label="Not started" n={notStarted} />
+        <div className="flex h-32 min-w-0 flex-1 items-end gap-1 border-b border-line" role="group" aria-label="Learners currently on each step">
+          {cols.map((c) => {
+            const n = c.working + c.stuck + c.failed;
+            const on = activeStep === c.step;
+            return (
+              <button
+                key={c.step}
+                onClick={() => onSelectStep(on ? null : c.step)}
+                aria-pressed={on}
+                title={`Step ${c.step}: ${LAB_STEPS[c.step - 1]}`}
+                className="group relative flex min-w-0 flex-1 flex-col items-center justify-end self-stretch"
+                style={{ opacity: activeStep !== null && !on ? 0.35 : 1 }}
               >
-                <span className="w-full" style={{ height: `${100 - failedPct - donePct}%`, background: body }} />
-                {donePct > 0 && <span className="w-full" style={{ height: `${donePct}%`, background: "#c9ced6" }} />}
-                {failedPct > 0 && <span className="w-full" style={{ height: `${failedPct}%`, background: "var(--failed)" }} />}
-              </span>
-              <span className="tnum text-[9px] leading-3 text-muted">{s.step}</span>
-            </button>
-          );
-        })}
+                <span className="tnum mb-1 text-[11px] text-muted">{n || ""}</span>
+                <span className="sr-only">{` learners on step ${c.step}${c.stuck ? `, ${c.stuck} stuck` : ""}${c.failed ? `, ${c.failed} failed` : ""}`}</span>
+                <span aria-hidden className="flex w-full max-w-7 flex-col-reverse group-hover:opacity-80" style={{ height: `${(n / max) * 100}%` }}>
+                  {c.working > 0 && <span style={{ flex: c.working, background: "var(--line-strong)" }} />}
+                  {c.stuck > 0 && <span style={{ flex: c.stuck, background: "var(--stuck)" }} />}
+                  {c.failed > 0 && <span style={{ flex: c.failed, background: "var(--failed)" }} />}
+                </span>
+                <span className={`tnum absolute -bottom-5 text-[11px] ${on ? "font-semibold text-ink" : "text-muted"}`}>{c.step}</span>
+              </button>
+            );
+          })}
+        </div>
+        <Tally label="Finished" n={finished} />
       </div>
+      <div className="h-4" />
     </section>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/* Activity pulse: transitions observed since this view opened         */
-/* ------------------------------------------------------------------ */
+function Tally({ label, n }: { label: string; n: number }) {
+  return (
+    <div className="w-[72px] shrink-0 pb-1">
+      <div className="tnum text-[22px] font-semibold leading-7 tracking-tight text-ink">{n}</div>
+      <div className="text-[12px] text-muted">{label}</div>
+    </div>
+  );
+}
 
+/* Highest spend so far. */
+export function TopSpenders({ everyone, onSelect }: { everyone: EnvRow[]; onSelect: (id: string) => void }) {
+  const top = useMemo(() => everyone.slice().sort((a, b) => b.spendUsd - a.spendUsd).slice(0, 5), [everyone]);
+  const max = top[0]?.spendUsd || 1;
+  return (
+    <section className="panel flex min-w-0 flex-col" aria-label="Highest spend">
+      <div className="panel-head">
+        <h2 className="panel-title">Highest spend</h2>
+        <span className="panel-meta">per PC</span>
+      </div>
+      <ul>
+        {top.map((r) => (
+          <li key={r.id}>
+            <button className="li-row" onClick={() => onSelect(r.id)}>
+              <span className="seat-ref">{seatOf(r.id)}</span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-baseline justify-between gap-2">
+                  <span className="truncate text-[13px] text-ink">{r.learnerName}</span>
+                  <span className="tnum text-[13px] text-ink">{fmtUsd(r.spendUsd)}</span>
+                </span>
+                <span className="mt-1.5 block h-[3px] bg-surface-3">
+                  <span className="block h-full" style={{ width: `${(r.spendUsd / max) * 100}%`, background: "var(--ramp-spend)" }} />
+                </span>
+              </span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/* Live activity: transitions observed since this page opened. */
 export interface Transition {
   id: string;
   learnerName: string;
@@ -249,67 +202,51 @@ export interface Transition {
   at: number;
 }
 
-interface PulseEvent {
-  key: string;
-  at: number;
-  name: string;
-  text: string;
-  tone: EnvState;
-}
-
-const TRANSITION_COPY: Record<EnvState, (failureReason: string | null) => string> = {
-  failed: (fr) => `failed${fr ? ` - ${fr}` : ""}`,
-  ready: () => "environment ready",
-  provisioning: () => "reprovisioning",
+const TRANSITION_COPY: Record<EnvState, (fr: string | null) => string> = {
+  failed: (fr) => `PC failed${fr ? `: ${fr}` : ""}`,
+  ready: () => "PC is ready",
+  provisioning: () => "PC is being reprovisioned",
   in_use: () => "started the lab",
-  deprovisioned: () => "completed the lab",
+  deprovisioned: () => "finished the lab",
 };
 
-export function ActivityPulse({ transitions, pollMs }: { transitions: Transition[]; pollMs: number }) {
-  const [events, setEvents] = useState<PulseEvent[]>([]);
+export function ActivityPulse({ transitions, onSelect }: { transitions: Transition[]; onSelect: (id: string) => void }) {
+  const [events, setEvents] = useState<(Transition & { key: string })[]>([]);
   const seenRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
-    const fresh: PulseEvent[] = [];
+    const fresh: (Transition & { key: string })[] = [];
     for (const t of transitions) {
-      const key = `${t.id}->${t.to}`;
+      const key = `${t.id}->${t.to}@${t.at}`;
       if (seenRef.current.has(key)) continue;
       seenRef.current.add(key);
-      fresh.push({
-        key,
-        at: t.at,
-        name: t.learnerName,
-        text: TRANSITION_COPY[t.to](t.failureReason),
-        tone: t.to,
-      });
+      fresh.push({ ...t, key });
     }
-    if (fresh.length) {
-      setEvents((cur) => [...fresh, ...cur].slice(0, 9));
-    }
+    if (fresh.length) setEvents((cur) => [...fresh, ...cur].slice(0, 12));
   }, [transitions]);
 
   return (
-    <section className="surface flex min-w-0 flex-col p-4" aria-label="Live activity">
-      <div className="mb-2.5 flex items-baseline justify-between gap-2">
-        <h2 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Live activity</h2>
-        <span className="text-[10px] text-muted">since opened, polled {pollMs / 1000}s</span>
+    <section className="panel flex min-h-0 min-w-0 flex-col" aria-label="Recent activity">
+      <div className="panel-head">
+        <h2 className="panel-title">Recent activity</h2>
+        <span className="panel-meta">since you opened this page</span>
       </div>
       {events.length === 0 ? (
-        <p className="text-[12px] leading-5 text-muted">
-          No transitions observed yet. Failures, completions and recoveries appear here as polls land.
-        </p>
+        <p className="border-t border-line px-4 py-5 text-[12.5px] text-muted">Nothing has changed yet. New failures and finishes show up here.</p>
       ) : (
-        <ul className="pulse-list -mr-1 flex-1 space-y-1.5 overflow-y-auto pr-1">
+        <ul className="overflow-y-auto" style={{ maxHeight: 240 }}>
           {events.map((e) => (
-            <li key={e.key} className="flex items-baseline gap-2 text-[12px] leading-5">
-              <span aria-hidden className="mt-[7px] inline-block size-1.5 shrink-0 rounded-full" style={{ background: STATE_META[e.tone].color }} />
-              <span className="min-w-0 flex-1 truncate">
-                <span className="font-medium text-ink">{e.name}</span>{" "}
-                <span style={{ color: e.tone === "failed" ? "var(--failed)" : "var(--ink-2)" }}>{e.text}</span>
-              </span>
-              <span className="tnum shrink-0 text-[10px] text-muted">
-                {new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })}
-              </span>
+            <li key={e.key}>
+              <button className="li-row !py-2" onClick={() => onSelect(e.id)}>
+                <span className="tnum w-11 shrink-0 whitespace-nowrap text-[11.5px] text-muted">
+                  {new Date(e.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-[12.5px]">
+                  <span className="text-ink">{e.learnerName}</span>{" "}
+                  <span className={e.to === "failed" ? "text-failed" : "text-muted"}>{TRANSITION_COPY[e.to](e.failureReason)}</span>
+                </span>
+                <span className="seat-ref text-right">{seatOf(e.id)}</span>
+              </button>
             </li>
           ))}
         </ul>
