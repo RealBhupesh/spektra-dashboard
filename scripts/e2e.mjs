@@ -149,11 +149,11 @@ await mob.waitForSelector("tbody tr td", { timeout: 20000 });
 await mob.waitForTimeout(1500);
 const overflow = await mob.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 ok("no page-level horizontal overflow at 390px", overflow <= 2, `overflow ${overflow}px`);
-const railWidth = await mob.evaluate(() => {
-  const aside = document.querySelector("aside");
-  return aside ? aside.getBoundingClientRect().width : 0;
+const bandWidth = await mob.evaluate(() => {
+  const band = document.querySelector(".command-band");
+  return band ? band.getBoundingClientRect().width : 0;
 });
-ok("mobile rail stacks full-width above table", railWidth >= 350, `rail ${railWidth}px`);
+ok("mobile command band stacks full-width above table", bandWidth >= 350, `band ${bandWidth}px`);
 await mob.screenshot({ path: "screenshots/spektra-shot-8-mobile.png", fullPage: false });
 await mob.close();
 

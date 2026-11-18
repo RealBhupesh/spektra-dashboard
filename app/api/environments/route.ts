@@ -39,6 +39,12 @@ function parseQuery(req: NextRequest): FilterQuery {
   return fq;
 }
 
+// Per-instance memory of the previous computed snapshot, used only to report
+// which environments changed state between polls (the "live activity" feed).
+// Cold instances start with an empty baseline and simply report no
+// transitions on their first poll - honest, never fabricated.
+let prevSnapshot: Map<string, EnvState> | null = null;
+
 export async function GET(req: NextRequest) {
   try {
     // One computed snapshot per request, shared by rows and summary, so the
@@ -48,12 +54,46 @@ export async function GET(req: NextRequest) {
     const fq = parseQuery(req);
     const filtered = applyFilter(all, fq, now);
     const summary = await getSummary(now);
+
+    // Full-cohort step distribution for the cohort heatmap: unaffected by
+    // the table's filters, computed from the same snapshot.
+    const totalSteps = all[0]?.totalSteps ?? 12;
+    const steps = Array.from({ length: totalSteps }, (_, i) => ({ step: i + 1, count: 0, failed: 0, stuck: 0, maxOnStep: 0 }));
+    for (const e of all) {
+      const b = steps[Math.min(Math.max(e.step, 1), totalSteps) - 1];
+      b.count++;
+      if (e.state === "failed") b.failed++;
+      if (isStuck(e, now)) b.stuck++;
+      // Dwell heat tracks ACTIVE learners only: a failed environment dwells
+      // by definition, and a completed one no longer burns time - including
+      // either would paint every bar hot and say nothing.
+      if (e.state !== "failed" && e.state !== "deprovisioned") {
+        const m = onStepMinutes(e, now);
+        if (m > b.maxOnStep) b.maxOnStep = Math.floor(m);
+      }
+    }
+
+    // State transitions since this instance's previous snapshot.
+    const transitions: { id: string; learnerName: string; to: EnvState; failureReason: string | null; at: number }[] = [];
+    const cur = new Map(all.map((e) => [e.id, e.state] as const));
+    if (prevSnapshot !== null) {
+      for (const e of all) {
+        const before = prevSnapshot.get(e.id);
+        if (before !== undefined && before !== e.state) {
+          transitions.push({ id: e.id, learnerName: e.learnerName, to: e.state, failureReason: e.failureReason, at: now });
+        }
+      }
+    }
+    prevSnapshot = cur;
+
     return NextResponse.json({
       now,
       total: all.length,
       filtered: filtered.length,
       filter: fq,
       summary,
+      steps,
+      transitions: transitions.slice(0, 12),
       environments: filtered.map((e) => ({
         ...e,
         spendUsd: Math.round(spendUsd(e) * 100) / 100,

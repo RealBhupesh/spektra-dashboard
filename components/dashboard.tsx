@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { SessionHealth, StepHeatmap, ActivityPulse, type StepBucket, type Transition } from "./ops-graphics";
 
 type EnvState = "provisioning" | "ready" | "in_use" | "failed" | "deprovisioned";
 
@@ -76,6 +77,8 @@ function StatusChip({ state, stuck }: { state: EnvState; stuck: boolean }) {
 
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [steps, setSteps] = useState<StepBucket[]>([]);
+  const [transitions, setTransitions] = useState<Transition[]>([]);
   const [rows, setRows] = useState<EnvRow[]>([]);
   const [filteredCount, setFilteredCount] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -171,6 +174,8 @@ export default function Dashboard() {
         window.setTimeout(() => setFlash(new Set()), 1000);
       }
       setSummary(s);
+      setSteps(Array.isArray(e.steps) ? (e.steps as StepBucket[]) : []);
+      setTransitions(Array.isArray(e.transitions) ? (e.transitions as Transition[]) : []);
       setRows(nextRows);
       setFilteredCount(e.filtered);
       setFetchError(null);
@@ -336,60 +341,22 @@ export default function Dashboard() {
         </div>
       </header>
 
-      <div className="mx-auto flex max-w-[1440px] flex-col gap-4 px-4 py-4 sm:px-5 lg:flex-row lg:gap-5">
-        {/* Left rail: session aggregates */}
-        <aside className="w-full lg:sticky lg:top-16 lg:w-[220px] lg:shrink-0 lg:self-start">
-          <section>
-            <h2 className="label mb-2">Session</h2>
-            <dl className="divide-y divide-line border-y border-line">
-              {([
-                ["Active", summary ? `${summary.active} / ${summary.total}` : "-", undefined],
-                ["Failures", summary ? String(summary.failures) : "-", summary && summary.failures > 0 ? "failed" : undefined],
-                ["Stuck 20m+", summary ? String(summary.stuckCount) : "-", summary && summary.stuckCount > 0 ? "stuck" : undefined],
-                ["Avg completion", summary ? `${summary.avgCompletionPct}%` : "-", undefined],
-              ] as const).map(([k, v, tone]) => (
-                <div key={k} data-st={tone} className="flex h-8 items-center justify-between">
-                  <dt className="text-[12px] text-ink-2">{k}</dt>
-                  <dd className="rail-value tnum">{v}</dd>
-                </div>
-              ))}
-            </dl>
-          </section>
-
-          <section className="mt-6">
-            <h2 className="label mb-2">Environments by state</h2>
-            {summary && (
-              <>
-                <div className="hist" role="img" aria-label="State distribution">
-                  {(Object.keys(STATE_META) as EnvState[]).map((s) =>
-                    summary.byState[s] > 0 ? (
-                      <div key={s} className="hist-seg" data-st={s} style={{ flexGrow: summary.byState[s] }} />
-                    ) : null
-                  )}
-                </div>
-                <ul className="mt-3 space-y-1">
-                  {(Object.keys(STATE_META) as EnvState[]).map((s) => (
-                    <li key={s} className="flex h-6 items-center justify-between">
-                      <StatusChip state={s} stuck={false} />
-                      <span className="tnum text-[12px] font-medium text-ink">{summary.byState[s]}</span>
-                    </li>
-                  ))}
-                </ul>
-              </>
-            )}
-          </section>
-
-          <p className="mt-6 text-[11px] leading-4 text-muted">
-            Polling every {POLL_MS / 1000}s.
-            {lastOkAt ? " Last update " + new Date(lastOkAt).toLocaleTimeString() + "." : ""}
-            {" "}Keys: <kbd className="kbd">/</kbd> filter,{" "}
-            <kbd className="kbd">↑↓</kbd> rows,{" "}
-            <kbd className="kbd">r</kbd> reprovision.
-          </p>
-        </aside>
+      <div className="mx-auto max-w-[1440px] px-4 py-4 sm:px-5">
+        {/* Command band: graphical session picture */}
+        <div className="command-band grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-[minmax(0,340px)_minmax(0,1fr)_minmax(0,320px)]">
+          <SessionHealth summary={summary} stateFilter={stateFilter} onToggleState={toggleState} />
+          <StepHeatmap
+            steps={steps}
+            activeStep={adv.step === "" ? null : Number(adv.step)}
+            onSelectStep={(step) => setAdv((a) => ({ ...a, step: step === null ? "" : String(step) }))}
+          />
+          <div className="md:col-span-2 xl:col-span-1">
+            <ActivityPulse transitions={transitions} pollMs={POLL_MS} />
+          </div>
+        </div>
 
         {/* Main */}
-        <main className="min-w-0 flex-1">
+        <main className="mt-4 min-w-0 flex-1">
           {/* Natural-language filter */}
           <div className="surface p-3">
             <div className="flex gap-2">
@@ -812,6 +779,14 @@ export default function Dashboard() {
               )}
             </section>
           )}
+
+          <p className="mt-4 text-[11px] leading-4 text-muted">
+            Polling every {POLL_MS / 1000}s.
+            {lastOkAt ? " Last update " + new Date(lastOkAt).toLocaleTimeString() + "." : ""}
+            {" "}Keys: <kbd className="kbd">/</kbd> filter,{" "}
+            <kbd className="kbd">↑↓</kbd> rows,{" "}
+            <kbd className="kbd">r</kbd> reprovision.
+          </p>
         </main>
       </div>
     </div>
