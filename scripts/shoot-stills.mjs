@@ -6,7 +6,7 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 const wait = (ms) => page.waitForTimeout(ms);
 
-await page.goto(BASE, { waitUntil: "networkidle" });
+await page.goto(`${BASE}/?view=table`, { waitUntil: "networkidle" });
 await page.waitForSelector(".ops-table tbody tr", { timeout: 15000 });
 await wait(1500);
 await page.screenshot({ path: "screenshots/shot-11-redesign-dense.png" });
@@ -20,7 +20,7 @@ await page.screenshot({ path: "screenshots/shot-12-redesign-detail.png" });
 await page.keyboard.press("Escape");
 
 // NL filter (stuck cohort visible on a fresh seed)
-await page.goto(BASE, { waitUntil: "networkidle" });
+await page.goto(`${BASE}/?view=table`, { waitUntil: "networkidle" });
 await page.waitForSelector(".ops-table tbody tr", { timeout: 15000 });
 await page.fill('input[aria-label="Natural language filter"]', "everyone stuck over 20 minutes");
 await page.keyboard.press("Enter");

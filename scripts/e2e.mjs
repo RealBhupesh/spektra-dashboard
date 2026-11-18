@@ -15,7 +15,7 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 // 1. Loads with the full dense dataset
-await page.goto(BASE, { waitUntil: "domcontentloaded" });
+await page.goto(`${BASE}/?view=table`, { waitUntil: "domcontentloaded" });
 await page.waitForSelector("tbody tr td", { timeout: 20000 });
 await page.waitForTimeout(2500); // let a poll land
 let rows = await page.locator("tbody tr").count();
@@ -24,7 +24,7 @@ ok("summary shows spend", /\$[0-9]/.test(await page.locator("header").innerText(
 
 // 2. Risk order: first visible row is FAILED
 const firstStatus = await page.locator("tbody tr:first-child td:first-child").innerText();
-ok("risk-first ordering puts FAILED on top", /FAILED/.test(firstStatus), firstStatus);
+ok("risk-first ordering puts FAILED on top", /failed/i.test(firstStatus), firstStatus);
 
 // 3. NL filter compiles and narrows the table
 await page.fill('input[aria-label="Natural language filter"]', "everyone stuck on step 4 over 20 min");
@@ -95,7 +95,7 @@ await page.click('button:has-text("FAILED")');
 await page.waitForTimeout(1200);
 const failedRows = await page.locator("tbody tr").count();
 const allFailed = await page.locator("tbody tr td:first-child").allInnerTexts();
-ok("failed filter shows only FAILED rows", failedRows > 0 && allFailed.every((s) => /FAILED/.test(s)));
+ok("failed filter shows only FAILED rows", failedRows > 0 && allFailed.every((s) => /failed/i.test(s)));
 
 // 5. Reprovision mutates state and the table reflects it
 const targetId = await page.locator("tbody tr:first-child td:nth-child(2) span.font-mono").innerText();
@@ -144,7 +144,7 @@ await page2.close();
 
 // 10. Mobile: no page-level horizontal overflow; table scrolls internally
 const mob = await browser.newPage({ viewport: { width: 390, height: 844 } });
-await mob.goto(BASE, { waitUntil: "domcontentloaded" });
+await mob.goto(`${BASE}/?view=table`, { waitUntil: "domcontentloaded" });
 await mob.waitForSelector("tbody tr td", { timeout: 20000 });
 await mob.waitForTimeout(1500);
 const overflow = await mob.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
@@ -188,7 +188,7 @@ await page.click('button:has-text("More filters")');
 await page.locator('label:has-text("Stuck 20m+ only") input').check();
 await page.waitForTimeout(1500);
 const stuckStatuses = await page.locator("tbody tr td:first-child").allInnerTexts();
-ok("advanced stuck filter shows only STUCK rows", stuckStatuses.length > 0 && stuckStatuses.every((s) => /STUCK/.test(s)), stuckStatuses.slice(0, 3).join(","));
+ok("advanced stuck filter shows only STUCK rows", stuckStatuses.length > 0 && stuckStatuses.every((s) => /stuck/i.test(s)), stuckStatuses.slice(0, 3).join(","));
 await page.click('button:has-text("Reset")');
 await page.click('button:has-text("More filters")');
 await page.waitForTimeout(900);

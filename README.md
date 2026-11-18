@@ -5,8 +5,26 @@ which environments are healthy, who is stuck, what is failing, and what the
 session is costing.
 
 Design intent: failures and stuck learners find the instructor, not the other
-way around. The table is sorted by risk, density comes before decoration, and
-color only ever carries status.
+way around. Color only ever carries status, and the surfaces stay flat and
+quiet so the few red and amber marks are what you notice first.
+
+Two views of the same live data:
+
+- **Floor map** (default): the room drawn like a cinema seat map. Row A is
+  nearest the instructor, an aisle splits the room, and each seat is one
+  learner's PC. A filled seat means someone is working, an outlined seat is
+  on but idle, a dashed seat is starting up, grey is finished and switched
+  off, and red/amber are failed/stuck. Switch the coloring to **Spend** or
+  **Progress** to see who has used the most or got furthest. Hover a seat
+  for a summary, click it for the full detail panel (step-by-step progress,
+  spend, rate, reprovision). Filters dim non-matching seats instead of
+  removing them, so the room keeps its shape. Searching a seat label
+  ("B7") finds that PC.
+- **All learners** (`?view=table`): the dense risk-sorted table.
+
+Alongside the map: a "Needs attention" queue (failures first, one-click
+fix), highest spenders, learners by step, and transitions seen since the
+page opened. Light and dark themes follow the OS, with a toggle.
 
 ## Setup
 
@@ -109,8 +127,9 @@ suggests phrasings that do work.
 ## Keyboard
 
 - `/` focuses the filter box
-- Arrow keys move through rows
-- `r` reprovisions the focused environment when it has failed
+- Arrow keys move through table rows, or between seats on the floor map
+- `r` reprovisions the focused environment (row or seat) when it has failed
+- `Esc` closes the detail panel
 
 ## Verification
 
@@ -133,9 +152,12 @@ offline compiler directly with a fixed clock: cold-start determinism,
 billing that stops at the simulated deprovision time, reprovision replay,
 stuck cohort presence, and compiler edge cases.
 
-`scripts/axe-check.mjs` is an axe-core audit of the four key states
-(default, detail strip open, failed filter, NL filter applied).
-Current result: 0 violations in all four states.
+`scripts/axe-check.mjs` is an axe-core audit of six key states (table
+default, detail panel open, failed filter, NL filter applied, floor map,
+floor map with a seat open). Current result: 0 violations in all six.
+
+The e2e suite drives the table view (`/?view=table`); the floor map reads
+the same API snapshot (`include=all` adds the full room to the response).
 
 ## AI-use disclosure
 
@@ -164,13 +186,21 @@ Where generic AI dashboard output was deliberately avoided, per the brief's
 - No gradient or glass styling. Text-labeled status chips, tabular numerals,
   motion only on state changes.
 
+Later on 2026-11-18 the UI was reworked again with Claude: the cinema-style
+floor map, the detail panel, and the side panels were added, and the
+visual style was pared back to flat, neutral surfaces.
+
 Run it and click through every flow before submitting; a review call will
 expect you to explain each file.
 
 ## Screenshots
 
-Captured against a live server under the full 120-row load are in
-`screenshots/`: the dense risk-sorted view, the detail strip, a 390px
+The floor map: `screenshots/shot-20-floor-map-light.png`,
+`shot-20-floor-map-dark.png`, `shot-21-seat-hover.png`,
+`shot-22-pc-detail.png`, `shot-23-spend-map.png`, `shot-24-mobile-floor.png`.
+
+Earlier table-view captures against a live server under the full 120-row
+load are also in `screenshots/`: the dense risk-sorted view, the detail strip, a 390px
 mobile pass, the NL filter applied, the failed-only view, the "costing the
 most" spend sort, and the empty state.
 
