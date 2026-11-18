@@ -1,6 +1,6 @@
 # Verification
 
-Verified locally against the completed source on November 18, 2026, around 22:29 IST. No employer submission has been made. This source has not yet been pushed or deployed.
+Verified locally and on the existing production deployment on November 18, 2026, through 22:45 IST. Published to personal GitHub main and https://spektra-dashboard.vercel.app. No employer submission has been made.
 
 ## Executed checks
 
@@ -22,10 +22,18 @@ These checks are evidence for the exercised cases, not a claim that all possible
 
 Current captures in `screenshots/final-*.png` include the full desktop floor, dense 120-row table, PC detail, both themes, Spend mode, loading, error, empty, model fallback, actual Groq confirmation, and full-page 390px/320px mobile views. The full cohort was loaded before dense captures. Desktop floor/detail, dark Spend, Groq confirmation and mobile pixels were inspected. At narrow widths the floor is an internally horizontally scrollable room; there is no page-level horizontal overflow at 390px or 320px.
 
-The seeded cohort, activity and spend are simulated. The displayed early runtime/spend includes seeded history, not newly observed Azure use. The modified hosted Blob path has not been exercised in production. Local multi-instance tests use separate processes and a shared temporary file store. The shared public session has not been reset. Isolated demos expire after 24 hours but stored records are not automatically deleted; production use would need authenticated access, distributed abuse controls and retention cleanup.
+The seeded cohort, activity and spend are simulated. The displayed early runtime/spend includes seeded history, not newly observed Azure use. The hosted private Blob path was exercised in production: creation of separate demos, reprovisioning in one, fresh reads preserving that action, unchanged failed state in the other, and an unchanged shared-session anchor. The hosted 38-check browser suite also verified tab-reload persistence. Local multi-instance tests use separate processes and a shared temporary file store; a forced production cold-start was not induced. The shared public session has not been reset. Isolated demos expire after 24 hours but stored records are not automatically deleted; production use would need authenticated access, distributed abuse controls and retention cleanup.
 
 The older `shot-*` images and `recordings/demo-75s.mp4` are legacy evidence, not proof of the final source. Current screenshots satisfy the assignment's recording-or-screenshots requirement.
 
 ## Dependency review
 
 The initial install reported seven advisory-affected entries. A clean regenerated lockfile now resolves PostCSS 8.5.33 through an override, Zod 4.6.7 through a scoped CLI-config override, and supported Sharp 0.35.5. `npm audit` reports zero vulnerabilities as of November 18, 2026. The framework stays on Next 15.5.29. A fresh production build, all 50 simulation, 24 route, 18 persistence and 38 browser checks, plus the 22-state axe audit, passed after this dependency cleanup. This is a point-in-time dependency scan, not a guarantee against unknown vulnerabilities.
+
+## Hosted release checks
+
+The same 38 browser checks passed against the production URL. The 22-state axe audit also passed with zero violations on the hosted app. Independent hosted API checks created two isolated demos, reprovisioned a failed PC in one and verified that the other demo and shared session were unaffected. The public shared cohort was not reset.
+
+Real hosted Groq calls returned confirmation-required suggestions. In the browser, a step-4/low-progress suggestion left all seats unchanged before confirmation, then applied only after the confirmation button was clicked. That particular interpretation produced no matches, correctly shown as an empty filtered state. Repeating vague low-progress language sometimes produced the safe manual-control fallback rather than a model suggestion; the model is optional and nondeterministic.
+
+The hosted floor, detail panel, Groq confirmation and applied filter, dark Spend view and 390px mobile capture were visually inspected. `screenshots/hosted-*.png` contains this release evidence. There was no page-level mobile overflow. The source and screenshots contain no provider key. The initial application release was commit `bb0c9f3d87adeace268ae99c0eb6d603dd78a406`; this verification update changes documentation and evidence only.

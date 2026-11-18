@@ -34,7 +34,7 @@ The route validates the full response and checks recognizable constraints in the
 
 ## Verification and evidence
 
-See [VERIFICATION.md](VERIFICATION.md) for the exact commands, results, and screenshot checklist. The existing files in `screenshots/` and `recordings/demo-75s.mp4` are legacy captures. `scripts/shoot-stills.mjs` captures the current dashboard into `screenshots/final-*.png` and checks the full 120-row or 120-seat load before taking the dense captures.
+See [VERIFICATION.md](VERIFICATION.md) for the exact commands, results, and screenshot checklist. The `shot-*` files and `recordings/demo-75s.mp4` are legacy captures; `final-*` and `hosted-*` are current evidence. `scripts/shoot-stills.mjs` captures the current dashboard into `screenshots/final-*.png` and checks the full 120-row or 120-seat load before taking the dense captures.
 
 ## AI-use disclosure
 
