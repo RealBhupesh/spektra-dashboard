@@ -17,6 +17,7 @@ interface EnvRow {
   spendUsd: number;
   progressPct: number;
   onStepMinutes: number;
+  stepDurationMin?: number;
   stuck: boolean;
 }
 
@@ -312,6 +313,18 @@ export default function Dashboard() {
             </span>
             <span className="label flex items-baseline gap-2">
               Elapsed <span className="tnum font-mono text-[13px] font-semibold normal-case tracking-normal text-ink">{elapsed}</span>
+            </span>
+            <span
+              className="label flex items-baseline gap-2"
+              data-st={summary && summary.failures > 0 ? "failed" : undefined}
+            >
+              Failed{" "}
+              <span
+                className="tnum font-mono text-[13px] font-semibold normal-case tracking-normal"
+                style={{ color: summary && summary.failures > 0 ? "var(--failed)" : "var(--ink)" }}
+              >
+                {summary ? String(summary.failures) : "-"}
+              </span>
             </span>
             <span className="label flex items-baseline gap-2">
               Est. spend{" "}
@@ -712,42 +725,90 @@ export default function Dashboard() {
             </table>
           </div>
 
-          {/* Detail strip for the selected row */}
+          {/* Inspector for the selected row */}
           {selected && (
-            <section className="surface mt-3 flex flex-wrap items-start gap-x-8 gap-y-3 p-4 text-[12px]"
-              data-st={selected.stuck ? "stuck" : selected.state}>
-              <div>
-                <div className="text-[15px] font-semibold text-ink">{selected.learnerName}</div>
-                <div className="text-muted">{selected.learnerEmail}</div>
-              </div>
-              <div>
-                <div className="label">State</div>
-                <StatusChip state={selected.state} stuck={selected.stuck} />
+            <section
+              className="surface inspector mt-3"
+              data-st={selected.stuck ? "stuck" : selected.state}
+              aria-label={`Details for ${selected.learnerName}`}
+            >
+              <div className="min-w-[180px]">
+                <div className="flex items-baseline gap-2">
+                  <span className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{selected.learnerName}</span>
+                  <span className="font-mono text-[11px] text-muted">{selected.id}</span>
+                </div>
+                <div className="text-[12px] text-muted">{selected.learnerEmail}</div>
+                <div className="mt-2 flex items-center gap-2">
+                  <StatusChip state={selected.state} stuck={selected.stuck} />
+                </div>
                 {selected.failureReason && (
-                  <div className="mt-1 max-w-[40ch] text-[11px] text-failed">{selected.failureReason}</div>
+                  <div className="mt-1 text-[12px] font-medium text-failed">{selected.failureReason}</div>
                 )}
               </div>
-              <div>
-                <div className="label">Progress</div>
-                <div className="tnum text-[15px] font-semibold text-ink">
-                  {selected.step}/{selected.totalSteps} ({selected.progressPct}%)
+
+              <div className="min-w-[240px] flex-1">
+                <div className="label">Lab progress</div>
+                <div className="mt-1 flex items-baseline gap-2">
+                  <span className="tnum text-[13px] font-semibold text-ink">
+                    Step {selected.step} of {selected.totalSteps}
+                  </span>
+                  <span className="tnum font-mono text-[11px] text-muted">{selected.progressPct}% complete</span>
                 </div>
-              </div>
-              <div>
-                <div className="label">Spend</div>
-                <div className="tnum text-[15px] font-semibold text-ink">${selected.spendUsd.toFixed(2)}</div>
-                <div className="font-mono text-[11px] text-muted">
-                  ${selected.ratePerHour.toFixed(2)}/h, {fmtMin(selected.runtimeMinutes)} runtime
-                </div>
-              </div>
-              {selected.state === "failed" && (
-                <button
-                  onClick={() => reprovision(selected.id)}
-                  disabled={pending.has(selected.id)}
-                  className="btn btn-danger ml-auto h-8 px-3"
+                <div
+                  className="step-track mt-1.5"
+                  role="img"
+                  aria-label={`${selected.step} of ${selected.totalSteps} steps reached`}
                 >
-                  {pending.has(selected.id) ? "Reprovisioning" : "Reprovision environment"}
-                </button>
+                  {Array.from({ length: selected.totalSteps }).map((_, i) => (
+                    <span
+                      key={i}
+                      className="step-seg"
+                      data-done={
+                        selected.state === "deprovisioned" || i < selected.step - (selected.state === "in_use" || selected.state === "failed" ? 1 : 0)
+                          ? true
+                          : undefined
+                      }
+                      data-current={
+                        (selected.state === "in_use" || selected.state === "failed") && i === selected.step - 1
+                          ? true
+                          : undefined
+                      }
+                    />
+                  ))}
+                </div>
+                <div className="mt-1.5 font-mono text-[11px] text-muted">
+                  {selected.state === "in_use" || selected.state === "failed"
+                    ? `${fmtMin(selected.onStepMinutes)} on this step`
+                    : selected.state === "deprovisioned"
+                      ? "Lab completed"
+                      : "Lab not started"}
+                  {selected.stepDurationMin && (selected.state === "in_use" || selected.state === "failed")
+                    ? ` · ~${Math.round(selected.stepDurationMin)}m expected`
+                    : ""}
+                </div>
+              </div>
+
+              <div className="min-w-[130px]">
+                <div className="label">Spend</div>
+                <div className="tnum mt-1 text-[15px] font-semibold text-ink">${selected.spendUsd.toFixed(2)}</div>
+                <div className="font-mono text-[11px] text-muted">
+                  ${selected.ratePerHour.toFixed(2)}/h · {fmtMin(selected.runtimeMinutes)} runtime
+                </div>
+              </div>
+
+              {selected.state === "failed" && (
+                <div className="ml-auto text-right">
+                  <button
+                    onClick={() => reprovision(selected.id)}
+                    disabled={pending.has(selected.id)}
+                    className="btn btn-danger h-8 px-3"
+                  >
+                    {pending.has(selected.id) ? "Reprovisioning" : "Reprovision environment"}
+                  </button>
+                  <div className="mt-1 max-w-[26ch] text-[11px] leading-4 text-muted">
+                    Restarts the lab from step 1; the clock keeps billing.
+                  </div>
+                </div>
               )}
             </section>
           )}

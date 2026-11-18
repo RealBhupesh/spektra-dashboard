@@ -6,13 +6,18 @@ import { clientKey, rateLimitOk } from "@/lib/ratelimit";
 export const dynamic = "force-dynamic";
 
 // Optional LLM tier. Unset by default: the repo runs fully offline on the
-// local compiler. When LLM_BASE_URL + LLM_API_KEY + LLM_MODEL are set, the
-// model is asked for the SAME FilterQuery JSON shape, strictly validated, and
-// any failure falls back to the local compiler instead of failing the
-// dashboard. The brief scopes the model to a LOCAL deployment (free/local
-// fine), so only loopback / private-network endpoints are honored: a hosted
-// API base URL is ignored rather than silently sending instructor queries to
-// a third party.
+// local compiler. Two model paths, both OpenAI-compatible chat completions:
+//   1. Groq (hosted): GROQ_API_KEY set -> api.groq.com, GROQ_MODEL or
+//      openai/gpt-oss-120b (default chosen because it is on the account's
+//      free-tier allowlist). The key stays server-side; only the query text
+//      is sent.
+//   2. Any local/self-hosted server (Ollama etc.): LLM_BASE_URL +
+//      LLM_API_KEY + LLM_MODEL, loopback/private-network endpoints only, so
+//      a hosted URL here is ignored rather than silently sending instructor
+//      queries to an unvetted third party.
+// Either way the model is asked for the SAME FilterQuery JSON shape,
+// strictly validated, and any failure falls back to the local compiler
+// instead of failing the dashboard.
 function isLocalBaseUrl(u: string): boolean {
   try {
     const h = new URL(u).hostname.toLowerCase();
@@ -31,14 +36,24 @@ function isLocalBaseUrl(u: string): boolean {
   }
 }
 
-async function tryLLM(text: string): Promise<FilterQuery | null> {
+function llmConfig(): { base: string; key: string; model: string } | null {
+  const groqKey = process.env.GROQ_API_KEY;
+  if (groqKey) {
+    return { base: "https://api.groq.com/openai/v1", key: groqKey, model: process.env.GROQ_MODEL || "openai/gpt-oss-120b" };
+  }
   const base = process.env.LLM_BASE_URL;
   const key = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL;
-  if (!base || !key || !model) return null;
-  if (!isLocalBaseUrl(base)) return null;
+  if (base && key && model && isLocalBaseUrl(base)) return { base, key, model };
+  return null;
+}
+
+async function tryLLM(text: string): Promise<FilterQuery | null> {
+  const cfg = llmConfig();
+  if (!cfg) return null;
+  const { base, key, model } = cfg;
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 9000); // CPU-local models can be slow on first token
+  const timeout = setTimeout(() => controller.abort(), 9000); // slow first token must not stall the filter
   try {
     const res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
@@ -120,11 +135,11 @@ function intentHints(text: string): Set<string> {
   if (/progress|done|complete|finish|barely|started|behind|ahead|far along/.test(t)) {
     keys.add("minProgressPct").add("maxProgressPct");
   }
-  if (/stuck|blocked|slow|waiting|long|idle/.test(t)) keys.add("stuck").add("minStepMinutes");
+  if (/stuck|blocked|slow|waiting|long|idle|parked|lingering|ages|forever|same\s+(step|lesson|stage)/.test(t)) keys.add("stuck").add("minStepMinutes");
   if (/step\s*\d/.test(t)) keys.add("step");
   if (/\d+\s*(min|mins|minutes|hour|hours)/.test(t)) keys.add("minStepMinutes");
-  if (/cost|spend|spent|bill|\$|expensive|price|budget/.test(t)) keys.add("minSpend");
-  if (/fail|broken|error|down|crash/.test(t)) keys.add("states");
+  if (/cost|spend|spent|bill|\$|expensive|price|budget|burning/.test(t)) keys.add("minSpend");
+  if (/fail|break|error|down|crash/.test(t)) keys.add("states");
   if (/ready|provision|deprovision|in use|active|finished|done|complete/.test(t)) keys.add("states");
   if (/named|name|called|env-\d+|^[a-z]+ [a-z]+$/.test(t)) keys.add("q");
   return keys;
@@ -187,7 +202,7 @@ export async function POST(req: NextRequest) {
   }
 
   // Nothing compiled the query: fail safe, manual filters keep working.
-  if (process.env.LLM_BASE_URL && process.env.LLM_API_KEY) {
+  if (llmConfig()) {
     local.source = "llm-fallback-local";
     local.degraded = true;
   }

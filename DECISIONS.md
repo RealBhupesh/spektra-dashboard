@@ -41,11 +41,13 @@ natural-language filter, in three tiers. Tier 1 is a deterministic offline
 compiler for the canonical phrasings. It abstains rather than guesses:
 negation ("not failed") is refused with guidance, unknown words are named
 back, and an unparseable name after "named" is an abstain, never a silently
-dropped clause. Tier 2 is an optional local model (tested with Ollama +
-qwen2.5:0.5b); only loopback/private endpoints are honored, per the brief's
-free/local constraint. Model output is strictly validated (bounds, integer
-steps, consistent ranges), cross-checked against the query's intent words,
-described in plain language, and applied only on instructor confirmation.
+dropped clause. Tier 2 is an optional model: the hosted demo uses Groq's
+free tier (openai/gpt-oss-120b, key as a server-side env var), and any
+local OpenAI-compatible server works via loopback/private endpoints only.
+Model output is strictly validated (bounds, integer steps, consistent
+ranges), cross-checked against the query's intent words, described in plain
+language, and applied only on instructor confirmation. A confidently-wrong
+model answer is abstained, never shown.
 Tier 3 is the manual bar: state chips, search, sort, and an advanced panel
 that exposes every predicate the filter compiles to (stuck, step, minutes,
 progress range, spend) — no capability depends on a model. Model down,

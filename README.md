@@ -57,10 +57,13 @@ instead of dropped, and strict vs inclusive thresholds survive
 
 Canonical phrasings never touch a model: a deterministic compiler handles
 them exactly, offline, with zero setup. Free-form phrasing goes to a real
-model when one is configured. Tested locally with Ollama + qwen2.5:0.5b
-(free, runs on CPU):
+model when one is configured. Two model paths, both OpenAI-compatible:
 
 ```bash
+# Hosted demo: Groq (free tier). Server-side env var only.
+GROQ_API_KEY=... npm run dev            # model: openai/gpt-oss-120b
+
+# Or any local server, e.g. Ollama (free, runs on CPU):
 ollama pull qwen2.5:0.5b
 LLM_BASE_URL=http://127.0.0.1:11434/v1 \
 LLM_API_KEY=ollama \
@@ -68,16 +71,21 @@ LLM_MODEL=qwen2.5:0.5b \
 npm run dev
 ```
 
-Only local endpoints are honored: the route ignores any base URL that is not
-loopback or private-network, keeping the optional model tier local per the
-brief. A larger local model understands loose phrasing better than a 0.5B one.
+The local path honors only loopback/private-network endpoints, so a hosted
+base URL set through `LLM_BASE_URL` is ignored rather than silently sending
+instructor queries to an unvetted third party. The hosted demo uses Groq's
+free tier (openai/gpt-oss-120b); the key lives only as a server-side env
+var, and per-model free-tier limits (1000 requests/min at the time of
+writing) sit far above any dashboard traffic. Neither path is required:
+unset them and everything still works offline.
 
-Honest limitation from the actual qwen2.5:0.5b test: the model round-trips
-and its output validates, but at 0.5B it is often confidently off-topic, so
-the intent cross-check below abstains on many free-form queries rather than
-showing a wrong suggestion. The model tier is real and verified end-to-end;
-its usefulness scales with model size, and the abstention path is what makes
-a small model safe to ship.
+Model quality caveat, from testing both sizes: a 0.5B local model is often
+confidently off-topic, which the intent cross-check below catches by
+abstaining instead of showing a wrong suggestion. A larger model (the 120B
+Groq default) compiles loose phrasing correctly far more often. Either way
+the same safety contract holds: strict validation, intent cross-check,
+plain-language description, instructor confirmation before anything
+applies.
 
 Model output is never applied silently. It is validated against the schema,
 then cross-checked against the query's own intent words: output that ignores
