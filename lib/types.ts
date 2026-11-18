@@ -39,6 +39,12 @@ export interface FilterQuery {
   minProgressPct?: number;
   maxProgressPct?: number;
   minSpend?: number;
+  // Strict vs inclusive thresholds, preserved from the instructor's words:
+  // "under 25%" excludes a learner at exactly 25%, "25% or less" includes her.
+  minStepMinutesExclusive?: boolean;
+  minProgressExclusive?: boolean;
+  maxProgressExclusive?: boolean;
+  minSpendExclusive?: boolean;
   stuck?: boolean;
   sort?: "risk" | "name" | "progress" | "spend" | "stepMinutes";
   order?: "asc" | "desc";

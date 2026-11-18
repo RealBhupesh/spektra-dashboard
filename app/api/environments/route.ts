@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getEnvironments } from "@/lib/store";
+import { getEnvironments, getSummary } from "@/lib/store";
 import { applyFilter, isStuck, onStepMinutes, progressPct, spendUsd } from "@/lib/filters";
 import { EnvState, FilterQuery, STATE_ORDER } from "@/lib/types";
 
@@ -26,7 +26,12 @@ function parseQuery(req: NextRequest): FilterQuery {
   fq.minProgressPct = num("minProgressPct");
   fq.maxProgressPct = num("maxProgressPct");
   fq.minSpend = num("minSpend");
-  if (p.get("stuck") === "1" || p.get("stuck") === "true") fq.stuck = true;
+  const flag = (k: string) => p.get(k) === "1" || p.get(k) === "true";
+  if (flag("minStepMinutesExclusive")) fq.minStepMinutesExclusive = true;
+  if (flag("minProgressExclusive")) fq.minProgressExclusive = true;
+  if (flag("maxProgressExclusive")) fq.maxProgressExclusive = true;
+  if (flag("minSpendExclusive")) fq.minSpendExclusive = true;
+  if (flag("stuck")) fq.stuck = true;
   const sort = p.get("sort");
   if (sort === "risk" || sort === "name" || sort === "progress" || sort === "spend" || sort === "stepMinutes") fq.sort = sort;
   const order = p.get("order");
@@ -36,27 +41,30 @@ function parseQuery(req: NextRequest): FilterQuery {
 
 export async function GET(req: NextRequest) {
   try {
+    // One computed snapshot per request, shared by rows and summary, so the
+    // table and the aggregates can never disagree within a refresh.
     const now = Date.now();
-    const all = getEnvironments();
+    const all = await getEnvironments(now);
     const fq = parseQuery(req);
     const filtered = applyFilter(all, fq, now);
+    const summary = await getSummary(now);
     return NextResponse.json({
       now,
       total: all.length,
       filtered: filtered.length,
       filter: fq,
+      summary,
       environments: filtered.map((e) => ({
         ...e,
         spendUsd: Math.round(spendUsd(e) * 100) / 100,
         progressPct: progressPct(e),
-        onStepMinutes: Math.round(onStepMinutes(e, now) * 10) / 10,
+        // Floor, never round up: a learner at 19.96 min is not yet stuck and
+        // must not display as "20m".
+        onStepMinutes: Math.floor(onStepMinutes(e, now) * 10) / 10,
         stuck: isStuck(e, now),
       })),
     });
-  } catch (err) {
-    return NextResponse.json(
-      { error: "environments_unavailable", detail: err instanceof Error ? err.message : "unknown" },
-      { status: 500 }
-    );
+  } catch {
+    return NextResponse.json({ error: "environments_unavailable" }, { status: 500 });
   }
 }

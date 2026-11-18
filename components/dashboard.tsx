@@ -95,27 +95,41 @@ export default function Dashboard() {
     filter: Record<string, unknown>;
   } | null>(null);
 
+  // Advanced manual controls: the same predicates the NL filter compiles to,
+  // so no filtering capability depends on the natural-language feature.
+  const [advOpen, setAdvOpen] = useState(false);
+  const [adv, setAdv] = useState({ stuck: false, step: "", minStepMinutes: "", minProgressPct: "", maxProgressPct: "", minSpend: "" });
+
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [focusIdx, setFocusIdx] = useState(-1);
   const [flash, setFlash] = useState<Set<string>>(new Set());
   const [pending, setPending] = useState<Set<string>>(new Set());
   const prevStates = useRef<Map<string, string>>(new Map());
+  const focusIdRef = useRef<string | null>(null);
   const rowRefs = useRef<(HTMLTableRowElement | null)[]>([]);
   const nlRef = useRef<HTMLInputElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Manual controls always work. With an AI/NL filter applied they merge
-  // over it (same shared FilterQuery server-side): manual state chips replace
-  // NL states, search replaces NL name search. An NL result that compiles to a
-  // sort (e.g. "who is costing the most") presets the sort control, which the
-  // instructor can then override like any manual choice.
+  // Manual controls always work. With a natural-language filter applied they
+  // merge over it (same shared FilterQuery server-side): manual state chips
+  // replace the filter's states, search replaces its name search, and any
+  // advanced control replaces the same field from the filter. An NL result
+  // that compiles to a sort (e.g. "who is costing the most") presets the sort
+  // control, which the instructor can then override like any manual choice.
   const params = useMemo(() => {
     const p = new URLSearchParams();
     const f = (nlApplied?.filter ?? {}) as Record<string, unknown>;
-    for (const k of ["step", "minStepMinutes", "minProgressPct", "maxProgressPct", "minSpend"]) {
-      if (typeof f[k] === "number") p.set(k, String(f[k]));
+    // Advanced manual values win over the same field from the NL filter.
+    for (const k of ["step", "minStepMinutes", "minProgressPct", "maxProgressPct", "minSpend"] as const) {
+      const manual = adv[k].trim();
+      if (manual !== "" && Number.isFinite(Number(manual))) p.set(k, manual);
+      else if (typeof f[k] === "number") {
+        p.set(k, String(f[k]));
+        const excl = { step: null, minStepMinutes: "minStepMinutesExclusive", minProgressPct: "minProgressExclusive", maxProgressPct: "maxProgressExclusive", minSpend: "minSpendExclusive" }[k];
+        if (excl && f[excl] === true) p.set(excl, "1");
+      }
     }
-    if (f.stuck === true) p.set("stuck", "1");
+    if (adv.stuck || f.stuck === true) p.set("stuck", "1");
     const states = stateFilter.length ? stateFilter.join(",") : Array.isArray(f.states) ? (f.states as string[]).join(",") : "";
     if (states) p.set("states", states);
     const q = search.trim() || (typeof f.q === "string" ? f.q : "");
@@ -123,17 +137,21 @@ export default function Dashboard() {
     p.set("sort", sortBy);
     if (sortBy === "spend" || sortBy === "stepMinutes" || sortBy === "progress") p.set("order", "desc");
     return p;
-  }, [stateFilter, search, sortBy, nlApplied]);
+  }, [stateFilter, search, sortBy, nlApplied, adv]);
 
+  // Superseded responses are discarded: a slow earlier poll (or one fired
+  // with pre-mutation filters) must never overwrite fresher rows.
+  const pollSeq = useRef(0);
   const poll = useCallback(async () => {
+    const seq = ++pollSeq.current;
     try {
-      const [sRes, eRes] = await Promise.all([
-        fetch("/api/session", { cache: "no-store" }),
-        fetch(`/api/environments?${params.toString()}`, { cache: "no-store" }),
-      ]);
-      if (!sRes.ok || !eRes.ok) throw new Error(`server ${sRes.status}/${eRes.status}`);
-      const s = (await sRes.json()) as Summary;
+      // Rows and session summary come from one response, computed from one
+      // snapshot, so the rail and the table always agree.
+      const eRes = await fetch(`/api/environments?${params.toString()}`, { cache: "no-store" });
+      if (!eRes.ok) throw new Error(`server ${eRes.status}`);
       const e = await eRes.json();
+      if (seq !== pollSeq.current) return; // a newer poll is already in flight
+      const s = e.summary as Summary;
       const nextRows = e.environments as EnvRow[];
 
       // Mark rows whose state changed since the previous poll.
@@ -158,6 +176,7 @@ export default function Dashboard() {
       setLastOkAt(Date.now());
       setLoading(false);
     } catch (err) {
+      if (seq !== pollSeq.current) return;
       setFetchError(err instanceof Error ? err.message : "network error");
       setLoading(false);
     }
@@ -170,14 +189,17 @@ export default function Dashboard() {
     return () => window.clearInterval(t);
   }, [poll]);
 
+  const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null);
   const reprovision = useCallback(async (id: string) => {
     setPending((p) => new Set(p).add(id));
+    setActionError(null);
     try {
       const res = await fetch(`/api/environments/${id}/reprovision`, { method: "POST" });
       if (!res.ok) throw new Error(`server ${res.status}`);
       await poll();
     } catch {
-      setFetchError("reprovision failed; will retry on next poll");
+      // Reads only refresh data; a failed mutation needs its own retry.
+      setActionError({ id, message: `Reprovision of ${id} failed.` });
     } finally {
       setPending((p) => {
         const n = new Set(p);
@@ -221,7 +243,7 @@ export default function Dashboard() {
         }
       }
     } catch {
-      setNlError("AI filter unavailable right now. Manual filters below still work.");
+      setNlError("Natural-language filter unavailable right now. Manual filters below still work.");
     } finally {
       setNlBusy(false);
     }
@@ -233,7 +255,7 @@ export default function Dashboard() {
     setNlError(null);
   }, []);
 
-  // Keyboard: "/" focuses the AI filter, arrows move row focus, r reprovisions, Esc clears.
+  // Keyboard: "/" focuses the filter box, arrows move row focus, r reprovisions, Esc clears.
   useEffect(() => {
     const onKey = (ev: KeyboardEvent) => {
       const tag = (ev.target as HTMLElement)?.tagName;
@@ -255,7 +277,10 @@ export default function Dashboard() {
           return next;
         });
       } else if (ev.key === "r" && focusIdx >= 0) {
-        const row = rows[focusIdx];
+        // Resolve by id captured at focus time via the row's current entry:
+        // polls can reorder the table, so an array index can point at a
+        // different environment than the one the instructor is looking at.
+        const row = rows.find((r) => r.id === focusIdRef.current);
         if (row && row.state === "failed" && !pending.has(row.id)) reprovision(row.id);
       }
     };
@@ -266,6 +291,9 @@ export default function Dashboard() {
   rowRefs.current = [];
   const toggleState = (s: EnvState) =>
     setStateFilter((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
+
+  const advActive =
+    (adv.stuck ? 1 : 0) + ["step", "minStepMinutes", "minProgressPct", "maxProgressPct", "minSpend"].filter((k) => adv[k as keyof typeof adv] !== "").length;
 
   const elapsed = summary ? fmtClock(Date.now() - summary.sessionStartedAt) : "-";
   const selected = rows.find((r) => r.id === selectedId) ?? null;
@@ -416,7 +444,11 @@ export default function Dashboard() {
                 )}
                 <span className="text-muted">
                   {" "}compiled {nlApplied.source === "llm" ? "by the AI model, confirmed by you" : "by the offline compiler, no model used"}
-                  {(stateFilter.length > 0 || search.trim()) && "; combined with your manual filters"}
+                  {stateFilter.length > 0 && Array.isArray(nlApplied.filter.states)
+                    ? "; your state buttons override the filter's states"
+                    : search.trim() && typeof nlApplied.filter.q === "string"
+                      ? "; your search overrides the filter's name"
+                      : (stateFilter.length > 0 || search.trim()) && "; combined with your manual filters"}
                 </span>
               </p>
             )}
@@ -465,10 +497,91 @@ export default function Dashboard() {
               <option value="spend">Sort: spend</option>
               <option value="stepMinutes">Sort: longest on step</option>
             </select>
+            <button
+              onClick={() => setAdvOpen((v) => !v)}
+              aria-expanded={advOpen}
+              className="btn h-7 px-2 text-[12px]"
+            >
+              More filters{advActive > 0 ? ` (${advActive})` : ""}
+            </button>
+            {(advActive > 0) && (
+              <button
+                onClick={() => setAdv({ stuck: false, step: "", minStepMinutes: "", minProgressPct: "", maxProgressPct: "", minSpend: "" })}
+                className="btn h-7 px-2 text-[12px]"
+              >
+                Reset
+              </button>
+            )}
             <span className="ml-auto text-[11px] text-muted">
               <span className="tnum">{filteredCount}</span> of <span className="tnum">{summary?.total ?? 120}</span> shown
             </span>
           </div>
+
+          {advOpen && (
+            <div className="surface mt-2 flex flex-wrap items-center gap-x-4 gap-y-2 p-3 text-[12px]">
+              <span className="label">Advanced</span>
+              <label className="flex items-center gap-1.5">
+                <input
+                  type="checkbox"
+                  checked={adv.stuck}
+                  onChange={(e) => setAdv((a) => ({ ...a, stuck: e.target.checked }))}
+                />
+                Stuck 20m+ only
+              </label>
+              <label className="flex items-center gap-1.5">
+                On step
+                <input
+                  type="number" min={1} max={12} value={adv.step}
+                  onChange={(e) => setAdv((a) => ({ ...a, step: e.target.value }))}
+                  aria-label="On step" className="control h-7 w-16 text-[12px]"
+                />
+              </label>
+              <label className="flex items-center gap-1.5">
+                On step at least
+                <input
+                  type="number" min={0} value={adv.minStepMinutes}
+                  onChange={(e) => setAdv((a) => ({ ...a, minStepMinutes: e.target.value }))}
+                  aria-label="Minutes on current step" className="control h-7 w-16 text-[12px]"
+                />
+                min
+              </label>
+              <label className="flex items-center gap-1.5">
+                Progress
+                <input
+                  type="number" min={0} max={100} value={adv.minProgressPct}
+                  onChange={(e) => setAdv((a) => ({ ...a, minProgressPct: e.target.value }))}
+                  aria-label="Minimum progress percent" className="control h-7 w-16 text-[12px]"
+                />
+                to
+                <input
+                  type="number" min={0} max={100} value={adv.maxProgressPct}
+                  onChange={(e) => setAdv((a) => ({ ...a, maxProgressPct: e.target.value }))}
+                  aria-label="Maximum progress percent" className="control h-7 w-16 text-[12px]"
+                />
+                %
+              </label>
+              <label className="flex items-center gap-1.5">
+                Spend at least $
+                <input
+                  type="number" min={0} step="0.5" value={adv.minSpend}
+                  onChange={(e) => setAdv((a) => ({ ...a, minSpend: e.target.value }))}
+                  aria-label="Minimum spend" className="control h-7 w-20 text-[12px]"
+                />
+              </label>
+            </div>
+          )}
+
+          {actionError && (
+            <div role="alert" className="banner-error mt-3">
+              <span>{actionError.message} The action was not applied; polling only refreshes data.</span>
+              <button onClick={() => reprovision(actionError.id)} className="btn btn-sm btn-danger">
+                Retry reprovision
+              </button>
+              <button onClick={() => setActionError(null)} className="btn btn-sm">
+                Dismiss
+              </button>
+            </div>
+          )}
 
           {fetchError && (
             <div role="alert" className="banner-error mt-3">
@@ -517,6 +630,7 @@ export default function Dashboard() {
                         onClick={() => {
                           setStateFilter([]);
                           setSearch("");
+                          setAdv({ stuck: false, step: "", minStepMinutes: "", minProgressPct: "", maxProgressPct: "", minSpend: "" });
                           clearNL();
                         }}
                         className="btn ml-2"
@@ -539,7 +653,10 @@ export default function Dashboard() {
                         tabIndex={0}
                         data-st={r.stuck ? "stuck" : r.state}
                         data-selected={isSel || undefined}
-                        onFocus={() => setFocusIdx(i)}
+                        onFocus={() => {
+                          setFocusIdx(i);
+                          focusIdRef.current = r.id;
+                        }}
                         onClick={() => setSelectedId(isSel ? null : r.id)}
                         onKeyDown={(e) => {
                           if (e.target !== e.currentTarget) return; // Enter on the Reprovision button stays on the button

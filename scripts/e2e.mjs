@@ -107,7 +107,7 @@ ok("reprovision removes env from failed list", stillThere === 0, `${targetId} st
 // 6. Keyboard: "/" focuses the NL filter; arrows move into the table
 await page.keyboard.press("/");
 const focused = await page.evaluate(() => document.activeElement?.getAttribute("aria-label"));
-ok('"/" focuses the AI filter', focused === "Natural language filter", String(focused));
+ok('"/" focuses the filter box', focused === "Natural language filter", String(focused));
 await page.keyboard.press("Escape");
 await page.keyboard.press("ArrowDown");
 const rowFocused = await page.evaluate(() => document.activeElement?.tagName === "TR");
@@ -156,6 +156,68 @@ const railWidth = await mob.evaluate(() => {
 ok("mobile rail stacks full-width above table", railWidth >= 350, `rail ${railWidth}px`);
 await mob.screenshot({ path: "screenshots/spektra-shot-8-mobile.png", fullPage: false });
 await mob.close();
+
+// 11. Rows and summary come from one snapshot: counts always agree
+const sess = await (await fetch(`${BASE}/api/session`)).json();
+const fJson = await (await fetch(`${BASE}/api/environments?states=failed`)).json();
+ok("summary failures match filtered failed rows", fJson.filtered === sess.byState.failed && sess.failures === sess.byState.failed, `${fJson.filtered} vs ${sess.failures}/${sess.byState.failed}`);
+const eJson = await (await fetch(`${BASE}/api/environments`)).json();
+ok("environments response embeds the session summary", typeof eJson.summary?.estimatedSpend === "number");
+
+// 12. Negation abstains instead of inverting the filter
+await page.fill('input[aria-label="Natural language filter"]', "not failed");
+await page.keyboard.press("Enter");
+await page.waitForSelector('[role="alert"]', { timeout: 8000 });
+const negMsg = await page.locator('[role="alert"]').first().innerText();
+ok("negation abstains with guidance", /negation/i.test(negMsg), negMsg.slice(0, 90));
+await page.fill('input[aria-label="Natural language filter"]', "");
+await page.keyboard.press("Escape");
+
+// 13. Name + state clauses combine instead of dropping the name
+const combo = await (await fetch(`${BASE}/api/nl-filter`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "failed learner named Priya" }) })).json();
+ok("NL combines name + state", combo.ok && combo.filter.q === "Priya" && combo.filter.states?.includes("failed"), JSON.stringify(combo.filter));
+
+// 14. "under 25%" excludes rows at exactly 25%
+const u = await (await fetch(`${BASE}/api/nl-filter`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text: "under 25%" }) })).json();
+ok('"under 25%" compiles exclusive', u.ok && u.filter.maxProgressExclusive === true, JSON.stringify(u.filter));
+const uRows = (await (await fetch(`${BASE}/api/environments?maxProgressPct=25&maxProgressExclusive=1`)).json()).environments;
+ok("exclusive bound excludes exactly-25% rows", uRows.length > 0 && uRows.every((r) => r.progressPct < 25), `${uRows.length} rows`);
+
+// 15. Advanced manual filters work without the NL feature
+await page.click('button:has-text("More filters")');
+await page.locator('label:has-text("Stuck 20m+ only") input').check();
+await page.waitForTimeout(1500);
+const stuckStatuses = await page.locator("tbody tr td:first-child").allInnerTexts();
+ok("advanced stuck filter shows only STUCK rows", stuckStatuses.length > 0 && stuckStatuses.every((s) => /STUCK/.test(s)), stuckStatuses.slice(0, 3).join(","));
+await page.click('button:has-text("Reset")');
+await page.click('button:has-text("More filters")');
+await page.waitForTimeout(900);
+
+// 16. "r" reprovisions the focused row (by stable id, not stale index)
+await page.click('button:has-text("FAILED")');
+await page.waitForTimeout(1200);
+const focusId = (await page.locator("tbody tr:first-child td:nth-child(2) span.font-mono").innerText()).trim();
+await page.locator("tbody tr:first-child").focus();
+await page.keyboard.press("r");
+await page.waitForTimeout(5000);
+ok('"r" reprovisions the focused row', (await page.locator(`tbody tr:has-text("${focusId}")`).count()) === 0, `${focusId} still listed`);
+await page.click('button:has-text("FAILED")');
+await page.waitForTimeout(900);
+
+// 17. Reprovision on a non-failed env is a visible no-op, not an error
+const readyId = await (async () => {
+  const j = await (await fetch(`${BASE}/api/environments?states=ready`)).json();
+  return j.environments[0]?.id;
+})();
+if (readyId) {
+  const rp = await (await fetch(`${BASE}/api/environments/${readyId}/reprovision`, { method: "POST" })).json();
+  ok("reprovision on ready env is a no-op echo", rp.ok === true && rp.environment.state === "ready", JSON.stringify(rp.environment?.state));
+}
+
+// 18. Progress semantics via API: no in_use env displays 100%
+const allEnv = (await (await fetch(`${BASE}/api/environments`)).json()).environments;
+const inUse100 = allEnv.filter((r) => r.state === "in_use" && r.progressPct >= 100);
+ok("no in_use env shows 100% progress", inUse100.length === 0, `${inUse100.length}`);
 
 await browser.close();
 console.log(`\n${passed} passed, ${failed} failed`);

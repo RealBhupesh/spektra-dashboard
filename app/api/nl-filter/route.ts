@@ -1,19 +1,42 @@
 import { NextRequest, NextResponse } from "next/server";
 import { compileNL, describeFilter, NLResult } from "@/lib/nlparser";
 import { FilterQuery } from "@/lib/types";
+import { clientKey, rateLimitOk } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
 // Optional LLM tier. Unset by default: the repo runs fully offline on the
-// local compiler. When LLM_BASE_URL + LLM_API_KEY + LLM_MODEL are set (any
-// OpenAI-compatible endpoint), the model is asked for the SAME FilterQuery
-// JSON shape, strictly validated, and any failure falls back to the local
-// compiler instead of failing the dashboard.
+// local compiler. When LLM_BASE_URL + LLM_API_KEY + LLM_MODEL are set, the
+// model is asked for the SAME FilterQuery JSON shape, strictly validated, and
+// any failure falls back to the local compiler instead of failing the
+// dashboard. The brief scopes the model to a LOCAL deployment (free/local
+// fine), so only loopback / private-network endpoints are honored: a hosted
+// API base URL is ignored rather than silently sending instructor queries to
+// a third party.
+function isLocalBaseUrl(u: string): boolean {
+  try {
+    const h = new URL(u).hostname.toLowerCase();
+    return (
+      h === "localhost" ||
+      h === "127.0.0.1" ||
+      h === "::1" ||
+      h === "[::1]" ||
+      h.endsWith(".local") ||
+      /^10\./.test(h) ||
+      /^192\.168\./.test(h) ||
+      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function tryLLM(text: string): Promise<FilterQuery | null> {
   const base = process.env.LLM_BASE_URL;
   const key = process.env.LLM_API_KEY;
   const model = process.env.LLM_MODEL;
   if (!base || !key || !model) return null;
+  if (!isLocalBaseUrl(base)) return null;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 9000); // CPU-local models can be slow on first token
   try {
@@ -55,15 +78,30 @@ async function tryLLM(text: string): Promise<FilterQuery | null> {
       const s = raw.states.filter((x: unknown) => typeof x === "string" && validStates.has(x));
       if (s.length) out.states = s;
     }
-    // Reject degenerate values a small model emits when guessing: they are
-    // either no-ops (min*: 0, maxProgressPct: 100) or query-killers (q "0").
+    // Reject degenerate or impossible values a small model emits when
+    // guessing: no-ops (min*: 0, maxProgressPct: 100), query-killers
+    // (q "0"), fractional steps, steps beyond the lab guide, out-of-range
+    // percentages, and contradictory progress bounds.
     if (typeof raw.q === "string" && raw.q.length >= 2 && raw.q.length <= 60) out.q = raw.q;
-    for (const k of ["step", "minStepMinutes", "minProgressPct", "minSpend"] as const) {
-      if (typeof raw[k] === "number" && Number.isFinite(raw[k]) && raw[k] > 0) out[k] = raw[k];
+    if (typeof raw.step === "number" && Number.isInteger(raw.step) && raw.step >= 1 && raw.step <= 12) out.step = raw.step;
+    if (typeof raw.minStepMinutes === "number" && Number.isFinite(raw.minStepMinutes) && raw.minStepMinutes > 0 && raw.minStepMinutes <= 600) {
+      out.minStepMinutes = raw.minStepMinutes;
     }
-    if (typeof raw.maxProgressPct === "number" && Number.isFinite(raw.maxProgressPct) && raw.maxProgressPct < 100) {
+    if (typeof raw.minProgressPct === "number" && Number.isFinite(raw.minProgressPct) && raw.minProgressPct > 0 && raw.minProgressPct <= 100) {
+      out.minProgressPct = raw.minProgressPct;
+    }
+    if (typeof raw.maxProgressPct === "number" && Number.isFinite(raw.maxProgressPct) && raw.maxProgressPct >= 0 && raw.maxProgressPct < 100) {
       out.maxProgressPct = raw.maxProgressPct;
     }
+    if (
+      typeof out.minProgressPct === "number" &&
+      typeof out.maxProgressPct === "number" &&
+      out.minProgressPct > out.maxProgressPct
+    ) {
+      delete out.minProgressPct;
+      delete out.maxProgressPct;
+    }
+    if (typeof raw.minSpend === "number" && Number.isFinite(raw.minSpend) && raw.minSpend > 0) out.minSpend = raw.minSpend;
     if (raw.stuck === true) out.stuck = true;
     return Object.keys(out).length ? out : null;
   } catch {
@@ -93,6 +131,11 @@ function intentHints(text: string): Set<string> {
 }
 
 export async function POST(req: NextRequest) {
+  // The endpoint is public in the demo; cap per-client request rate so a
+  // script cannot hammer the model tier (or the compiler) in a loop.
+  if (!rateLimitOk(`nl:${clientKey(req)}`, 60, 60_000)) {
+    return NextResponse.json({ error: "rate_limited" }, { status: 429 });
+  }
   let text = "";
   try {
     const body = await req.json();

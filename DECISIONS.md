@@ -1,63 +1,53 @@
 # Decisions
 
-**Data model.** One `Environment` per learner: id, name, state
-(provisioning / ready / in_use / failed / deprovisioned), step progress
-(`step` of 12, `stepStartedAt`), billing (`ratePerHour`, accrued
-`runtimeMinutes`), and a per-learner expected step duration. Spend is always
-computed as `rate x runtime`, never stored, so drift and mutations can never
-desync it. The 120 seats are generated from a fixed seed (identical every
-first boot), persisted to `.data/state.json`, and drifted on each server
-tick: provisioning completes or fails, learners start, steps advance at the
-learner's own pace, completed labs deprovision. Billing keeps accruing on
-failed environments because a broken VM is still provisioned.
+**Data model: derived state, persisted actions.** One `Environment` per
+learner: id, name, state (provisioning / ready / in_use / failed /
+deprovisioned), step progress, billing (`ratePerHour` x accrued
+`runtimeMinutes`), expected step duration. The 120 seats come from a fixed
+seed; every later transition is drawn from a per-environment deterministic
+stream, so the entire simulation is a pure function of (seed, session start,
+reprovision log, now) — `lib/replay.ts`. Only the session anchor and the
+operator's reprovision actions are persisted (`lib/persistence.ts`): local
+file in development, Vercel Blob in the hosted demo. A server restart, a
+serverless cold start, or a brand-new instance replays the identical
+timeline; there is no database to lose and no drift between instances.
+Spend is computed as rate x runtime, never stored.
 
-The seed pre-ages about 22% of in-use learners 20-65 minutes into a step so
-the stuck signal is exercised from the first load; they recover on their
-own. Stuck is not a one-shot fixture, though: 8% of step advances draw a
-22-42 minute expected step, so learners stall again later and the stuck
-rail keeps meaning something hours into a session. Without that, stuck
-could only ever come from the seed cohort and the signal went dark after
-about two hours.
+Billing accrues segment by segment during replay, so it stops at the exact
+simulated deprovision time and keeps accruing through hours of nobody
+polling — the honest model of lab VMs. Verified by `scripts/sim-test.mjs`:
+identical inputs give byte-identical state, no deprovisioned environment
+accrues further runtime, a logged reprovision starts a new deterministic
+life, and the seeded stuck cohort is present from first load (about 22% of
+in-use learners pre-aged 20-65 minutes; 8% of later steps draw a 22-42
+minute duration so the stuck signal recurs instead of going dark).
 
-**Billing is true wall-clock, with no cap.** Each tick bills the full
-elapsed time since the previous tick, however long the gap: lab VMs keep
-costing money while nobody is watching the dashboard. The same rule covers
-server restarts and downtime: `lastTickAt` is persisted to
-`.data/state.json`, so when the server comes back after being down, the
-first tick accrues the whole offline interval. The consequence of choosing
-this over a capped tick: a dashboard left unpolled for hours shows hours of
-new spend, which is the honest model of how lab billing works. Persistence
-is best-effort and throttled to about one write per 2 seconds, so an
-ungraceful crash can lose at most ~2s of accrual. Verified by test: a 75s
-gap bills 75s (measured 99.6% after tick timing slack), a restart mid-gap
-bills the full gap, and a synthetic 3-hour idle period (state file edited
-to age `lastTickAt`) bills 180.1 minutes.
+**Why the logic is server-side.** Filtering, sorting, spend math, and
+session aggregates run in the API routes; each response computes rows and
+summary from one snapshot at one `now`, so the rail and the table can never
+disagree, and a reprovision is reflected on the very next poll. Manual
+controls and the natural-language filter compile to one shared
+`FilterQuery` through one pipeline (`lib/filters.ts`), including strict vs
+inclusive thresholds ("under 25%" excludes a learner at exactly 25%).
+Progress counts completed steps: entering step 12 reads 92%, not 100%.
 
-**Why the logic is server-side.** The brief's interactions only hold up if
-the server owns them. Filtering and sorting 120 rows, spend math, and the
-session aggregates run in the API routes against the same store the mutation
-endpoint writes to, so a reprovision is reflected on the very next poll.
-Drift lives server-side too: multiple open tabs see one consistent world,
-and the client stays a thin polling view. Manual controls and the AI filter
-compile to one shared `FilterQuery` and run through one pipeline
-(`lib/filters.ts`), so the two paths can never disagree.
+**How the AI feature fails safely.** The one AI-native feature is the
+natural-language filter, in three tiers. Tier 1 is a deterministic offline
+compiler for the canonical phrasings. It abstains rather than guesses:
+negation ("not failed") is refused with guidance, unknown words are named
+back, and an unparseable name after "named" is an abstain, never a silently
+dropped clause. Tier 2 is an optional local model (tested with Ollama +
+qwen2.5:0.5b); only loopback/private endpoints are honored, per the brief's
+free/local constraint. Model output is strictly validated (bounds, integer
+steps, consistent ranges), cross-checked against the query's intent words,
+described in plain language, and applied only on instructor confirmation.
+Tier 3 is the manual bar: state chips, search, sort, and an advanced panel
+that exposes every predicate the filter compiles to (stuck, step, minutes,
+progress range, spend) — no capability depends on a model. Model down,
+slow, or invalid: the endpoint says so and the dashboard is unaffected.
 
-**How the AI feature fails safely.** The NL filter has three tiers. Tier 1
-is a deterministic compiler for the canonical phrasings (states, "stuck",
-step numbers, minutes, percentages, spend, names); it is exact about what it
-matched and needs no model. Tier 2 is an optional LLM behind any
-OpenAI-compatible endpoint, tested locally with Ollama + qwen2.5:0.5b. Model
-output is strictly validated (known keys, sane ranges, degenerate values
-dropped), then cross-checked against the query's own intent words: output
-that ignores what the request is about (say, a progress question answered
-with a state filter) is rejected with a plain abstention message instead of
-shown. Surviving output is described in plain language and applied only when
-the instructor confirms, because a small local model can still be wrong.
-Tier 3 is the manual filter bar, always fully functional. Model down, slow,
-or unparseable: the endpoint says so, nothing changes, and a notice suggests
-phrasings that work. The dashboard never depends on a model.
-
-**What's next.** Real CloudLabs API behind the same routes; per-step
-timestamps so "stuck" compares a learner to cohort medians instead of a fixed
-20 minutes; WebSocket push instead of polling; audit log of instructor
-actions; auth so two instructors can share a session view.
+**What's next.** Auth and an audit log of instructor actions (the public
+demo ships with best-effort per-IP rate limiting on the mutation and filter
+endpoints instead); real CloudLabs API behind the same routes; cohort-median
+stuck detection instead of a fixed 20 minutes; WebSocket push instead of
+polling.

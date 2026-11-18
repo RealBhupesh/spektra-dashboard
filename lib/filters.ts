@@ -4,8 +4,17 @@ export function spendUsd(e: Environment): number {
   return (e.runtimeMinutes / 60) * e.ratePerHour;
 }
 
+// Completed steps, not the step being worked on: a learner who just entered
+// step 12 has finished 11 of 12 (92%), not 100%. A learner who fails during
+// step 12 keeps 92% instead of reading as finished.
+export function completedSteps(e: Environment): number {
+  if (e.state === "deprovisioned") return e.totalSteps;
+  if (e.state === "in_use" || e.state === "failed") return Math.max(0, e.step - 1);
+  return 0;
+}
+
 export function progressPct(e: Environment): number {
-  return Math.round((e.step / e.totalSteps) * 100);
+  return Math.round((completedSteps(e) / e.totalSteps) * 100);
 }
 
 export function onStepMinutes(e: Environment, now: number): number {
@@ -36,11 +45,23 @@ export function applyFilter(envs: Environment[], fq: FilterQuery, now: number): 
       if (!e.learnerName.toLowerCase().includes(q) && !e.learnerEmail.toLowerCase().includes(q) && !e.id.includes(q)) return false;
     }
     if (typeof fq.step === "number" && e.step !== fq.step) return false;
-    if (typeof fq.minStepMinutes === "number" && onStepMinutes(e, now) < fq.minStepMinutes) return false;
+    if (typeof fq.minStepMinutes === "number") {
+      const v = onStepMinutes(e, now);
+      if (fq.minStepMinutesExclusive ? v <= fq.minStepMinutes : v < fq.minStepMinutes) return false;
+    }
     if (fq.stuck && !isStuck(e, now)) return false;
-    if (typeof fq.minProgressPct === "number" && progressPct(e) < fq.minProgressPct) return false;
-    if (typeof fq.maxProgressPct === "number" && progressPct(e) > fq.maxProgressPct) return false;
-    if (typeof fq.minSpend === "number" && spendUsd(e) < fq.minSpend) return false;
+    if (typeof fq.minProgressPct === "number") {
+      const v = progressPct(e);
+      if (fq.minProgressExclusive ? v <= fq.minProgressPct : v < fq.minProgressPct) return false;
+    }
+    if (typeof fq.maxProgressPct === "number") {
+      const v = progressPct(e);
+      if (fq.maxProgressExclusive ? v >= fq.maxProgressPct : v > fq.maxProgressPct) return false;
+    }
+    if (typeof fq.minSpend === "number") {
+      const v = spendUsd(e);
+      if (fq.minSpendExclusive ? v <= fq.minSpend : v < fq.minSpend) return false;
+    }
     return true;
   });
 
