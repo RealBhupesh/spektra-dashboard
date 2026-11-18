@@ -166,6 +166,10 @@ export async function POST(req: NextRequest) {
   // is always right about what it matched.
   const local = compileNL(text);
   if (local.ok) return NextResponse.json(local);
+  // Intent-safety refusals (negation, cross-category "or") are terminal: a
+  // model would happily re-interpret the query and silently invert intent,
+  // which is exactly what these refusals exist to prevent.
+  if (local.terminal) return NextResponse.json(local);
 
   // Tier 2: the model (when configured) handles free-form phrasing. Its
   // output is described in plain language and must be confirmed in the UI

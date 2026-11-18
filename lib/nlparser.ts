@@ -36,6 +36,11 @@ export interface NLResult {
   // True when a model produced this filter: the UI must show the plain
   // description and wait for the instructor to confirm before applying it.
   requiresConfirmation?: boolean;
+  // True when this abstain is an intent-safety refusal (negation,
+  // cross-category "or"): the caller must NOT escalate it to a model,
+  // because a model would happily re-interpret the query and silently
+  // change what the instructor asked for.
+  terminal?: boolean;
   message?: string;
 }
 
@@ -58,8 +63,8 @@ const FILLER = new Set(
    spinning starting deprovisioned use named name called or`.split(/\s+/),
 );
 
-function abstain(message: string): NLResult {
-  return { ok: false, filter: {}, description: [], confidence: 0, source: "local-parser", degraded: false, message };
+function abstain(message: string, terminal = false): NLResult {
+  return { ok: false, filter: {}, description: [], confidence: 0, source: "local-parser", degraded: false, terminal, message };
 }
 
 // Deterministic local compiler for the phrasings instructors actually type.
@@ -88,6 +93,7 @@ export function compileNL(input: string): NLResult {
   if (/\bnot\b|\bnever\b|\bn't\b|\bexcept\b|\bexcluding\b|\bwithout\b|\bother than\b/i.test(negProbe)) {
     return abstain(
       'I cannot compile negation safely. Say what you want to see instead - e.g. "ready" rather than "not failed" - or use the state buttons.',
+      true,
     );
   }
 
@@ -197,6 +203,7 @@ export function compileNL(input: string): NLResult {
   if (/\s+or\s+/i.test(text) && categories.size > 1) {
     return abstain(
       'I can only combine conditions with AND, not "or". Run them one at a time, e.g. "failed" then "stuck", or try separate searches.',
+      true,
     );
   }
 

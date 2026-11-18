@@ -306,12 +306,12 @@ export default function Dashboard() {
         <div className="mx-auto flex min-h-12 max-w-[1440px] flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2 sm:px-5">
           <h1 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">CloudLabs Workshop Ops</h1>
           <span className="truncate text-[12px] text-muted">{summary?.sessionName ?? "loading session"}</span>
-          <div className="ml-auto flex items-center gap-6">
+          <div className="ml-auto flex items-center gap-3 sm:gap-6">
             <span className="live" data-stale={fetchError ? "true" : undefined} aria-live="polite">
               <span aria-hidden className="live-dot" />
               {fetchError ? "Stale" : "Live"}
             </span>
-            <span className="label flex items-baseline gap-2">
+            <span className="label hidden items-baseline gap-2 sm:flex">
               Elapsed <span className="tnum font-mono text-[13px] font-semibold normal-case tracking-normal text-ink">{elapsed}</span>
             </span>
             <span
