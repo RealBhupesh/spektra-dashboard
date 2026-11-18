@@ -85,7 +85,14 @@ abstaining instead of showing a wrong suggestion. A larger model (the 120B
 Groq default) compiles loose phrasing correctly far more often. Either way
 the same safety contract holds: strict validation, intent cross-check,
 plain-language description, instructor confirmation before anything
-applies.
+applies. When the request is vague, the model must invent a number -
+"parked on the same lesson for ages" becomes "on current step for 60+ min" -
+and that invented threshold is shown in the plain-language description and
+waits for the instructor to confirm or dismiss it. No model assumption is
+ever applied silently. Two intent hazards never reach the model at all:
+negation and cross-category "or" are terminal refusals from the offline
+compiler, because a model would happily re-interpret them and invert what
+the instructor asked for.
 
 Model output is never applied silently. It is validated against the schema,
 then cross-checked against the query's own intent words: output that ignores
