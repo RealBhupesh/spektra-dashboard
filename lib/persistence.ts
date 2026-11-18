@@ -6,131 +6,263 @@ import { ReprovisionEvent } from "./replay";
 
 // The simulation itself is derivable (lib/replay.ts), so the only state that
 // must survive a cold start is the session anchor and the operator's
-// reprovision actions. Three backends, chosen by environment:
-//   1. Vercel Blob  - on Vercel, when BLOB_READ_WRITE_TOKEN is set (free Hobby
-//      tier; the store is created once at deploy time).
-//   2. Local file   - .data/state.json for npm start / npm run dev.
-//   3. Memory       - last-resort fallback so a storage outage degrades the
-//      demo (reprovisions revert on cold start) instead of taking it down.
+// reprovision actions. Design notes:
+//   - The log is APPEND-ONLY: one object per action, unique key, never
+//     overwritten. Two instances writing concurrently can never clobber each
+//     other (no read-modify-write of a shared document, so no lost updates).
+//   - Warm instances REFRESH from the shared store every REFRESH_TTL_MS and
+//     merge by key, so actions taken through one instance become visible to
+//     every other instance within that window.
+//   - Failures are visible: a mutation that cannot be written fails the
+//     request (the UI shows it) instead of pretending to save, and a cold
+//     instance that cannot read the store answers 503 instead of silently
+//     resetting to the seed.
+// Backends: Vercel Blob when BLOB_READ_WRITE_TOKEN is set (free Hobby tier),
+// a local directory in dev (.data/), in-memory only as the no-store fallback.
 export interface Persisted {
   sessionStartedAt: number;
   reprovisionLog: ReprovisionEvent[];
 }
 
+export class PersistUnavailable extends Error {
+  constructor(msg: string) {
+    super(msg);
+    this.name = "PersistUnavailable";
+  }
+}
+
 const DATA_DIR = path.join(process.cwd(), ".data");
-const STATE_FILE = path.join(DATA_DIR, "state.json");
-const BLOB_PATH = "cloudlabs-ops/state.json";
+const ANCHOR_FILE = path.join(DATA_DIR, "anchor.json");
+const ACTIONS_DIR = path.join(DATA_DIR, "actions");
+const ANCHOR_PATH = "cloudlabs-ops/anchor.json";
+const ACTIONS_PREFIX = "cloudlabs-ops/actions/";
 
-let mem: Persisted | null = null;
-let cache: { at: number; value: Persisted | null } = { at: 0, value: null };
-const CACHE_TTL_MS = 15_000;
+// Polls between refreshes are served from process memory; other instances'
+// actions surface within this window. Tests override via PERSIST_REFRESH_MS.
+const configuredTtl = Number(process.env.PERSIST_REFRESH_MS);
+const REFRESH_TTL_MS = Number.isFinite(configuredTtl) && configuredTtl > 0 ? configuredTtl : 30_000;
 
-// Generated once per serverless process. Runtime logs carry it so we can
-// prove a request was served by a DIFFERENT process that re-read the log
-// from Blob (a real cold start), not from this process's own memory.
+// Generated once per serverless process. Runtime logs carry it so a request
+// served by a fresh process (cold start) is distinguishable in the logs.
 const INSTANCE_ID = randomUUID().slice(0, 8);
 const slog = (msg: string) => console.log(`[persistence] instance=${INSTANCE_ID} ${msg}`);
 
-function readFileStore(): Persisted | null {
-  try {
-    const raw = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")) as Partial<Persisted> & {
-      // Pre-replay shape stored derived environments; only the anchor and log
-      // carry over, the rest is recomputed.
-      sessionStartedAt?: number;
-      reprovisionLog?: ReprovisionEvent[];
-    };
-    if (typeof raw.sessionStartedAt !== "number") return null;
-    return {
-      sessionStartedAt: raw.sessionStartedAt,
-      reprovisionLog: Array.isArray(raw.reprovisionLog) ? raw.reprovisionLog : [],
-    };
-  } catch {
-    return null;
-  }
+interface Mem {
+  anchor: number;
+  actions: Map<string, ReprovisionEvent>; // key: storage key (blob pathname or filename)
 }
 
-function writeFileStore(p: Persisted) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(STATE_FILE, JSON.stringify(p));
-  } catch {
-    // Best-effort locally; the in-memory copy stays authoritative.
-  }
-}
-
-async function readBlobStore(): Promise<Persisted | null> {
-  try {
-    // Explicit token: without it the SDK prefers the auto-injected OIDC
-    // credentials, which this store connection does not allow for writes.
-    const { blobs } = await list({ prefix: BLOB_PATH, limit: 1, token: process.env.BLOB_READ_WRITE_TOKEN });
-    const blob = blobs.find((b) => b.pathname === BLOB_PATH);
-    if (!blob) return null;
-    const res = await fetch(blob.downloadUrl, {
-      headers: { authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}` },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const raw = (await res.json()) as Persisted;
-    if (typeof raw.sessionStartedAt !== "number" || !Array.isArray(raw.reprovisionLog)) return null;
-    return raw;
-  } catch (err) {
-    console.error("blob read failed:", err instanceof Error ? err.message : err);
-    return null;
-  }
-}
-
-async function writeBlobStore(p: Persisted) {
-  try {
-    await put(BLOB_PATH, JSON.stringify(p), {
-      access: "private",
-      addRandomSuffix: false,
-      allowOverwrite: true,
-      contentType: "application/json",
-      token: process.env.BLOB_READ_WRITE_TOKEN,
-    });
-  } catch (err) {
-    // Best-effort: the in-memory copy stays authoritative for this instance.
-    console.error("blob write failed:", err instanceof Error ? err.message : err);
-  }
-}
+let mem: Mem | null = null;
+let lastRefreshAt = 0;
 
 const useBlob = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
-export async function loadPersisted(): Promise<Persisted | null> {
-  if (mem) {
-    slog(`source=mem logLen=${mem.reprovisionLog.length}`);
-    return mem;
-  }
-  if (useBlob()) {
-    if (cache.value && Date.now() - cache.at < CACHE_TTL_MS) {
-      slog(`source=cache logLen=${cache.value.reprovisionLog.length}`);
-      return cache.value;
-    }
-    const v = await readBlobStore();
-    cache = { at: Date.now(), value: v };
-    mem = v ?? mem;
-    slog(`source=blob logLen=${v ? v.reprovisionLog.length : "none"}`);
-    return v;
-  }
-  mem = readFileStore();
-  slog(`source=file logLen=${mem ? mem.reprovisionLog.length : "none"}`);
-  return mem;
+function toPersisted(m: Mem): Persisted {
+  return {
+    sessionStartedAt: m.anchor,
+    reprovisionLog: [...m.actions.values()].sort((a, b) => a.at - b.at),
+  };
 }
 
-export async function savePersisted(p: Persisted) {
-  mem = p;
-  if (useBlob()) {
-    cache = { at: Date.now(), value: p };
-    await writeBlobStore(p);
-    slog(`wrote=blob logLen=${p.reprovisionLog.length}`);
-    return;
+function validAction(v: unknown): v is ReprovisionEvent {
+  const e = v as ReprovisionEvent;
+  return Boolean(e && typeof e.id === "string" && typeof e.at === "number");
+}
+
+// ---------- Blob backend ----------
+
+async function blobFetchJson(url: string): Promise<unknown> {
+  const res = await fetch(url, {
+    headers: { authorization: `Bearer ${process.env.BLOB_READ_WRITE_TOKEN}` },
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`blob download ${res.status}`);
+  return res.json();
+}
+
+async function blobReadAnchor(): Promise<number | null> {
+  // Explicit token: without it the SDK prefers the auto-injected OIDC
+  // credentials, which this store connection does not allow for writes.
+  const { blobs } = await list({ prefix: ANCHOR_PATH, limit: 1, token: process.env.BLOB_READ_WRITE_TOKEN });
+  const b = blobs.find((x) => x.pathname === ANCHOR_PATH);
+  if (!b) return null;
+  const raw = (await blobFetchJson(b.downloadUrl)) as { sessionStartedAt?: number };
+  return typeof raw.sessionStartedAt === "number" ? raw.sessionStartedAt : null;
+}
+
+async function blobListActions(): Promise<{ pathname: string; downloadUrl: string }[]> {
+  const out: { pathname: string; downloadUrl: string }[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await list({ prefix: ACTIONS_PREFIX, limit: 1000, cursor, token: process.env.BLOB_READ_WRITE_TOKEN });
+    out.push(...page.blobs.map((b) => ({ pathname: b.pathname, downloadUrl: b.downloadUrl })));
+    cursor = page.hasMore ? page.cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+async function blobRefresh(): Promise<number | null> {
+  const anchor = mem?.anchor ?? (await blobReadAnchor());
+  const entries = await blobListActions();
+  const actions = mem?.actions ?? new Map<string, ReprovisionEvent>();
+  let added = 0;
+  for (const e of entries) {
+    if (actions.has(e.pathname)) continue;
+    const v = await blobFetchJson(e.downloadUrl);
+    if (validAction(v)) {
+      actions.set(e.pathname, v);
+      added++;
+    }
   }
-  writeFileStore(p);
-  slog(`wrote=file logLen=${p.reprovisionLog.length}`);
+  if (anchor !== null) {
+    mem = { anchor, actions };
+    lastRefreshAt = Date.now();
+  }
+  slog(`source=blob actions=${actions.size} (+${added})`);
+  return anchor;
+}
+
+async function blobWriteAnchor(anchor: number): Promise<number> {
+  try {
+    await put(ANCHOR_PATH, JSON.stringify({ sessionStartedAt: anchor }), {
+      access: "private",
+      addRandomSuffix: false,
+      allowOverwrite: false,
+      contentType: "application/json",
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
+    return anchor;
+  } catch (err) {
+    // Concurrent first boots race the anchor write; the loser adopts the
+    // winner's anchor so every instance replays the same session.
+    const existing = await blobReadAnchor().catch(() => null);
+    if (existing !== null) return existing;
+    throw err;
+  }
+}
+
+async function blobAppendAction(ev: ReprovisionEvent): Promise<boolean> {
+  const key = `${ACTIONS_PREFIX}${ev.at}-${ev.id}-${randomUUID().slice(0, 8)}.json`;
+  try {
+    await put(key, JSON.stringify(ev), {
+      access: "private",
+      addRandomSuffix: false,
+      allowOverwrite: false,
+      contentType: "application/json",
+      token: process.env.BLOB_READ_WRITE_TOKEN,
+    });
+    mem?.actions.set(key, ev);
+    slog(`appended=blob actions=${mem?.actions.size ?? 1}`);
+    return true;
+  } catch (err) {
+    console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+// ---------- File backend (local dev / tests) ----------
+
+function fileReadAnchor(): number | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(ANCHOR_FILE, "utf8"));
+    return typeof raw.sessionStartedAt === "number" ? raw.sessionStartedAt : null;
+  } catch {
+    return null;
+  }
+}
+
+function fileRefresh(): number | null {
+  const anchor = mem?.anchor ?? fileReadAnchor();
+  const actions = mem?.actions ?? new Map<string, ReprovisionEvent>();
+  let added = 0;
+  try {
+    for (const f of fs.readdirSync(ACTIONS_DIR)) {
+      if (actions.has(f) || !f.endsWith(".json")) continue;
+      try {
+        const v = JSON.parse(fs.readFileSync(path.join(ACTIONS_DIR, f), "utf8"));
+        if (validAction(v)) {
+          actions.set(f, v);
+          added++;
+        }
+      } catch {
+        // A partially written file is skipped; the next refresh retries it.
+      }
+    }
+  } catch {
+    // No actions directory yet: no actions.
+  }
+  if (anchor !== null) {
+    mem = { anchor, actions };
+    lastRefreshAt = Date.now();
+  }
+  slog(`source=file actions=${actions.size} (+${added})`);
+  return anchor;
+}
+
+function fileWriteAnchor(anchor: number): number {
+  fs.mkdirSync(ACTIONS_DIR, { recursive: true });
+  const existing = fileReadAnchor();
+  if (existing !== null) return existing;
+  fs.writeFileSync(ANCHOR_FILE, JSON.stringify({ sessionStartedAt: anchor }));
+  return anchor;
+}
+
+function fileAppendAction(ev: ReprovisionEvent): boolean {
+  const key = `${ev.at}-${ev.id}-${randomUUID().slice(0, 8)}.json`;
+  try {
+    fs.mkdirSync(ACTIONS_DIR, { recursive: true });
+    fs.writeFileSync(path.join(ACTIONS_DIR, key), JSON.stringify(ev), { flag: "wx" });
+    mem?.actions.set(key, ev);
+    slog(`appended=file actions=${mem?.actions.size ?? 1}`);
+    return true;
+  } catch (err) {
+    console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
+    return false;
+  }
+}
+
+// ---------- Public API ----------
+
+// Returns the merged state, or null when the store has never been anchored
+// (first boot). Throws PersistUnavailable when the store cannot be read and
+// this process has nothing cached - callers must fail the request rather
+// than silently reset to the seed.
+export async function loadPersisted(): Promise<Persisted | null> {
+  if (mem && Date.now() - lastRefreshAt < REFRESH_TTL_MS) {
+    return toPersisted(mem);
+  }
+  try {
+    const anchor = useBlob() ? await blobRefresh() : fileRefresh();
+    if (anchor === null) return null; // first boot, store reachable
+    return toPersisted(mem!);
+  } catch (err) {
+    if (mem) {
+      // Store temporarily unreachable: serve what we have (stale, not reset).
+      console.error(`[persistence] instance=${INSTANCE_ID} refresh failed, serving memory:`, err instanceof Error ? err.message : err);
+      return toPersisted(mem);
+    }
+    throw new PersistUnavailable(err instanceof Error ? err.message : String(err));
+  }
+}
+
+// First boot: anchor the session. Returns the anchor actually in use, which
+// may be a concurrently booted instance's anchor.
+export async function saveAnchor(anchor: number): Promise<number> {
+  const adopted = useBlob() ? await blobWriteAnchor(anchor) : fileWriteAnchor(anchor);
+  mem = { anchor: adopted, actions: mem?.actions ?? new Map() };
+  lastRefreshAt = Date.now();
+  slog(`anchor=${adopted}`);
+  return adopted;
+}
+
+// Append one reprovision action. False means the action was NOT saved;
+// callers must fail the request visibly instead of reporting a saved change.
+export async function appendAction(ev: ReprovisionEvent): Promise<boolean> {
+  return useBlob() ? blobAppendAction(ev) : fileAppendAction(ev);
 }
 
 // Test hook: drop the in-memory copy so the next load re-reads the backend.
 export function resetPersistenceCache() {
   mem = null;
-  cache = { at: 0, value: null };
+  lastRefreshAt = 0;
 }

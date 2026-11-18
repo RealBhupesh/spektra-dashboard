@@ -10,9 +10,15 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     return NextResponse.json({ error: "rate_limited" }, { status: 429 });
   }
   const { id } = await ctx.params;
-  const updated = await reprovision(id);
-  if (!updated) {
-    return NextResponse.json({ error: "not_found" }, { status: 404 });
+  try {
+    const updated = await reprovision(id);
+    if (!updated) {
+      return NextResponse.json({ error: "not_found" }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, environment: updated });
+  } catch (err) {
+    // The action was NOT durably saved; say so instead of faking success.
+    const msg = err instanceof Error && err.message === "persist_failed" ? "persist_failed" : "persist_unavailable";
+    return NextResponse.json({ error: msg }, { status: 503 });
   }
-  return NextResponse.json({ ok: true, environment: updated });
 }

@@ -173,12 +173,17 @@ The app deploys to Vercel (Hobby, free) with no behavior change: the
 simulation needs no database because it is recomputed deterministically
 from the seed and the clock. The only persisted state is the session anchor
 (set as `SESSION_STARTED_AT` at deploy time) and the instructor's
-reprovision actions, stored in a private Vercel Blob (free Hobby tier) so
-mutations survive cold starts. The mutation and filter endpoints carry
-best-effort per-IP rate limits; the demo is public and the data is fake.
+reprovision actions, kept in a private Vercel Blob (free Hobby tier) as an
+append-only log - one object per action - so concurrent instances never
+overwrite each other. Warm instances re-read and merge the log every 30
+seconds (`PERSIST_REFRESH_MS`), polls in between are served from process
+memory, and a mutation that cannot be written fails with a visible error
+instead of silently reverting on the next cold start. The mutation and
+filter endpoints carry best-effort per-IP, per-instance rate limits; the
+demo is public and the data is fake.
 
 Fixture note: the recording starts from a fresh seeded session (delete
-`.data/state.json` and restart). The seed deliberately pre-ages about 22%
+`.data/` and restart). The seed deliberately pre-ages about 22%
 of in-use environments 20-65 minutes into their current step
 (`lib/seed.ts`), so stuck states are present from the first load; nothing
 in the video is claimed as observed real-world elapsed time. Stuck learners

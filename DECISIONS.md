@@ -8,9 +8,14 @@ seed; every later transition is drawn from a per-environment deterministic
 stream, so the entire simulation is a pure function of (seed, session start,
 reprovision log, now) — `lib/replay.ts`. Only the session anchor and the
 operator's reprovision actions are persisted (`lib/persistence.ts`): local
-file in development, Vercel Blob in the hosted demo. A server restart, a
+files in development, Vercel Blob in the hosted demo. The log is
+append-only - one object per action, never rewritten - so two instances
+acting at once cannot lose each other's writes, and every warm instance
+re-reads and merges the shared log on a short refresh window, so one
+instance's action appears everywhere within seconds. A server restart, a
 serverless cold start, or a brand-new instance replays the identical
-timeline; there is no database to lose and no drift between instances.
+timeline; there is no database to lose. A write that cannot be stored
+fails the request visibly instead of pretending to save.
 Spend is computed as rate x runtime, never stored.
 
 Billing accrues segment by segment during replay, so it stops at the exact

@@ -64,7 +64,12 @@ export async function GET(req: NextRequest) {
         stuck: isStuck(e, now),
       })),
     });
-  } catch {
+  } catch (err) {
+    // A cold instance that cannot read the store must fail visibly instead
+    // of resetting to the seed as if no actions had ever happened.
+    if (err instanceof Error && err.name === "PersistUnavailable") {
+      return NextResponse.json({ error: "persist_unavailable" }, { status: 503 });
+    }
     return NextResponse.json({ error: "environments_unavailable" }, { status: 500 });
   }
 }

@@ -1,7 +1,7 @@
 import { Environment, SessionSummary } from "./types";
 import { seedEnvironments } from "./seed";
 import { computeState, ReprovisionEvent, SESSION_NAME, SEED } from "./replay";
-import { loadPersisted, savePersisted } from "./persistence";
+import { appendAction, loadPersisted, saveAnchor } from "./persistence";
 import { progressPct, spendUsd, isStuck } from "./filters";
 
 // State model: the seeded cohort plus every subsequent transition is a pure
@@ -26,12 +26,10 @@ async function live(): Promise<Live> {
   }
   // First boot on this backend: anchor the session. On Vercel the deploy sets
   // SESSION_STARTED_AT explicitly so concurrent cold starts cannot anchor
-  // divergent sessions before the first write lands.
+  // divergent sessions; saveAnchor adopts the winner's anchor if they race.
   const envAnchor = Number(process.env.SESSION_STARTED_AT);
-  const sessionStartedAt = Number.isFinite(envAnchor) && envAnchor > 0 ? envAnchor : Date.now();
-  const log: ReprovisionEvent[] = [];
-  await savePersisted({ sessionStartedAt, reprovisionLog: log });
-  return { sessionStartedAt, log };
+  const sessionStartedAt = await saveAnchor(Number.isFinite(envAnchor) && envAnchor > 0 ? envAnchor : Date.now());
+  return { sessionStartedAt, log: [] };
 }
 
 export async function getEnvironments(now = Date.now()): Promise<Environment[]> {
@@ -47,8 +45,11 @@ export async function reprovision(id: string, now = Date.now()): Promise<Environ
   const e = envs.find((x) => x.id === id);
   if (!e) return null;
   if (e.state !== "failed") return e; // no-op unless failed; reflected as-is
+  // The action only counts if it is durably appended to the shared log; a
+  // failed write must fail the request, not report an ephemeral change.
+  const saved = await appendAction({ id, at: now });
+  if (!saved) throw new Error("persist_failed");
   const nextLog = [...log, { id, at: now }];
-  await savePersisted({ sessionStartedAt, reprovisionLog: nextLog });
   return computeState(seeded, sessionStartedAt, nextLog, now).find((x) => x.id === id)!;
 }
 
