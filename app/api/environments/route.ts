@@ -58,11 +58,12 @@ export async function GET(req: NextRequest) {
     // Full-cohort step distribution for the cohort heatmap: unaffected by
     // the table's filters, computed from the same snapshot.
     const totalSteps = all[0]?.totalSteps ?? 12;
-    const steps = Array.from({ length: totalSteps }, (_, i) => ({ step: i + 1, count: 0, failed: 0, stuck: 0, maxOnStep: 0 }));
+    const steps = Array.from({ length: totalSteps }, (_, i) => ({ step: i + 1, count: 0, failed: 0, done: 0, stuck: 0, maxOnStep: 0 }));
     for (const e of all) {
       const b = steps[Math.min(Math.max(e.step, 1), totalSteps) - 1];
       b.count++;
       if (e.state === "failed") b.failed++;
+      if (e.state === "deprovisioned") b.done++;
       if (isStuck(e, now)) b.stuck++;
       // Dwell heat tracks ACTIVE learners only: a failed environment dwells
       // by definition, and a completed one no longer burns time - including

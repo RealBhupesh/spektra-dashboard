@@ -120,7 +120,7 @@ export function SessionHealth({
             ] as const
           ).map(([k, v, c]) => (
             <div key={k}>
-              <dt className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted">{k}</dt>
+              <dt className="whitespace-nowrap text-[10px] font-medium uppercase tracking-[0.06em] text-muted">{k}</dt>
               <dd className="tnum text-[16px] font-semibold leading-5" style={c ? { color: c } : undefined}>
                 {v}
               </dd>
@@ -164,6 +164,7 @@ export interface StepBucket {
   step: number;
   count: number;
   failed: number;
+  done: number;
   stuck: number;
   maxOnStep: number;
 }
@@ -185,7 +186,7 @@ export function StepHeatmap({
     <section className="surface flex min-w-0 flex-col p-4" aria-label="Cohort by lab step">
       <div className="mb-3 flex items-baseline justify-between gap-3">
         <h2 className="text-[11px] font-medium uppercase tracking-[0.08em] text-muted">Cohort by lab step</h2>
-        <span className="hidden text-[10px] text-muted sm:block">bar = learners - red = failed, amber = long dwell</span>
+        <span className="hidden text-[10px] text-muted sm:block">bar = learners on step - red failed, gray done, amber active dwell</span>
       </div>
       <div className="flex h-28 items-end gap-[6px]" role="group" aria-label="Steps">
         {steps.map((s) => {
@@ -196,6 +197,7 @@ export function StepHeatmap({
           const dim = activeStep !== null && !on;
           const totalH = Math.max((s.count / maxCount) * 100, s.count ? 6 : 0);
           const failedPct = s.count ? (s.failed / s.count) * 100 : 0;
+          const donePct = s.count ? (s.done / s.count) * 100 : 0;
           return (
             <button
               key={s.step}
@@ -207,7 +209,7 @@ export function StepHeatmap({
                 {s.count || ""}
               </span>
               <span className="sr-only">
-                {` learners on step ${s.step}${s.failed ? `, ${s.failed} failed` : ""}${s.stuck ? `, ${s.stuck} stuck` : ""}. Click to filter.`}
+                {` learners on step ${s.step}${s.failed ? `, ${s.failed} failed` : ""}${s.done ? `, ${s.done} completed` : ""}${s.stuck ? `, ${s.stuck} stuck` : ""}. Click to filter.`}
               </span>
               <span
                 aria-hidden
@@ -222,7 +224,8 @@ export function StepHeatmap({
                   transition: "opacity 150ms",
                 }}
               >
-                <span className="w-full" style={{ height: `${100 - failedPct}%`, background: body }} />
+                <span className="w-full" style={{ height: `${100 - failedPct - donePct}%`, background: body }} />
+                {donePct > 0 && <span className="w-full" style={{ height: `${donePct}%`, background: "#c9ced6" }} />}
                 {failedPct > 0 && <span className="w-full" style={{ height: `${failedPct}%`, background: "var(--failed)" }} />}
               </span>
               <span className="tnum text-[9px] leading-3 text-muted">{s.step}</span>
