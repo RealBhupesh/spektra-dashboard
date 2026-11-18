@@ -39,8 +39,8 @@ await page.waitForTimeout(800);
 // 3b. Cross-category "or" must NOT be silently ANDed: a warning shows instead
 await page.fill('input[aria-label="Natural language filter"]', "failed or stuck under 40%");
 await page.keyboard.press("Enter");
-await page.waitForSelector('[role="alert"]', { timeout: 8000 });
-const orMsg = await page.locator('[role="alert"]').first().innerText();
+await page.waitForSelector('p.note-warn[role="alert"]', { timeout: 8000 });
+const orMsg = await page.locator('p.note-warn[role="alert"]').first().innerText();
 ok('cross-category "or" warns instead of silently changing intent', /one at a time|AND/.test(orMsg), orMsg.slice(0, 80));
 ok('rejected OR query leaves table unchanged', (await page.locator("tbody tr").count()) >= 100);
 // the alert above may be the nl notice; ensure no stale error banner confusion
@@ -167,8 +167,8 @@ ok("environments response embeds the session summary", typeof eJson.summary?.est
 // 12. Negation abstains instead of inverting the filter
 await page.fill('input[aria-label="Natural language filter"]', "not failed");
 await page.keyboard.press("Enter");
-await page.waitForSelector('[role="alert"]', { timeout: 8000 });
-const negMsg = await page.locator('[role="alert"]').first().innerText();
+await page.waitForSelector('p.note-warn[role="alert"]', { timeout: 8000 });
+const negMsg = await page.locator('p.note-warn[role="alert"]').first().innerText();
 ok("negation abstains with guidance", /negation/i.test(negMsg), negMsg.slice(0, 90));
 await page.fill('input[aria-label="Natural language filter"]', "");
 await page.keyboard.press("Escape");

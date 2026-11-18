@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { put, list } from "@vercel/blob";
 import { ReprovisionEvent } from "./replay";
 
 // The simulation itself is derivable (lib/replay.ts), so the only state that
@@ -52,8 +53,9 @@ function writeFileStore(p: Persisted) {
 
 async function readBlobStore(): Promise<Persisted | null> {
   try {
-    const { list } = await import("@vercel/blob");
-    const { blobs } = await list({ prefix: BLOB_PATH, limit: 1 });
+    // Explicit token: without it the SDK prefers the auto-injected OIDC
+    // credentials, which this store connection does not allow for writes.
+    const { blobs } = await list({ prefix: BLOB_PATH, limit: 1, token: process.env.BLOB_READ_WRITE_TOKEN });
     const blob = blobs.find((b) => b.pathname === BLOB_PATH);
     if (!blob) return null;
     const res = await fetch(blob.downloadUrl, {
@@ -64,22 +66,24 @@ async function readBlobStore(): Promise<Persisted | null> {
     const raw = (await res.json()) as Persisted;
     if (typeof raw.sessionStartedAt !== "number" || !Array.isArray(raw.reprovisionLog)) return null;
     return raw;
-  } catch {
+  } catch (err) {
+    console.error("blob read failed:", err instanceof Error ? err.message : err);
     return null;
   }
 }
 
 async function writeBlobStore(p: Persisted) {
   try {
-    const { put } = await import("@vercel/blob");
     await put(BLOB_PATH, JSON.stringify(p), {
       access: "private",
       addRandomSuffix: false,
       allowOverwrite: true,
       contentType: "application/json",
+      token: process.env.BLOB_READ_WRITE_TOKEN,
     });
-  } catch {
+  } catch (err) {
     // Best-effort: the in-memory copy stays authoritative for this instance.
+    console.error("blob write failed:", err instanceof Error ? err.message : err);
   }
 }
 
