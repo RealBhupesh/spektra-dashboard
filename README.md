@@ -1,239 +1,43 @@
 # CloudLabs Workshop Operations Dashboard
 
-One screen for an instructor running a live Azure workshop with 120 learners:
-which environments are healthy, who is stuck, what is failing, and what the
-session is costing.
+An instructor dashboard for a simulated Azure workshop with 120 learners. The cinema-style floor keeps every seat in view, and the risk-sorted table makes failures and stalled learners quick to scan. Color distinguishes status, while the Spend and Progress maps use neutral tones.
 
-Design intent: failures and stuck learners find the instructor, not the other
-way around. Color only ever carries status, and the surfaces stay flat and
-quiet so the few red and amber marks are what you notice first.
+## Run locally
 
-Two views of the same live data:
+Use Node.js 18.18 or later. Verification used Node 22.
 
-- **Floor map** (default): the room drawn like a cinema seat map. Row A is
-  nearest the instructor, an aisle splits the room, and each seat is one
-  learner's PC. A filled seat means someone is working, an outlined seat is
-  on but idle, a dashed seat is starting up, grey is finished and switched
-  off, and red/amber are failed/stuck. Switch the coloring to **Spend** or
-  **Progress** to see who has used the most or got furthest. Hover a seat
-  for a summary, click it for the full detail panel (step-by-step progress,
-  spend, rate, reprovision). Filters dim non-matching seats instead of
-  removing them, so the room keeps its shape. Searching a seat label
-  ("B7") finds that PC.
-- **All learners** (`?view=table`): the dense risk-sorted table.
-
-Alongside the map: a "Needs attention" queue (failures first, one-click
-fix), highest spenders, learners by step, and transitions seen since the
-page opened. Light and dark themes follow the OS, with a toggle.
-
-## Setup
-
-Requires Node.js 18.18+ (tested on Node 22).
-
-```bash
-npm install
-npm run dev        # http://localhost:3000
-```
-
-Production:
-
-```bash
-npm run build
-npm start
-```
-
-No external services, accounts, or API keys are required. The dataset is
-seeded deterministically (120 environments) and the whole simulation is
-replayed deterministically from the seed plus wall-clock time, so the
-screen keeps moving while you watch and a restart loses nothing.
-
-## What is where
-
-- `app/api/environments` - one snapshot: filtered rows + session summary
-- `app/api/session` - session aggregates alone (active, failures, spend, avg completion)
-- `app/api/environments/[id]/reprovision` - the one state-changing action
-- `app/api/nl-filter` - the AI-native natural-language filter
-- `lib/replay.ts` - deterministic simulation: state = f(seed, clock, reprovision log)
-- `lib/persistence.ts` - stores only the session anchor + operator actions (file locally, Vercel Blob when hosted)
-- `lib/store.ts` - store facade: compute state, apply reprovision, aggregate
-- `lib/filters.ts` - the single filter/sort pipeline every client path shares
-- `lib/nlparser.ts` - offline compiler from plain English to a structured query
-- `lib/ratelimit.ts` - best-effort per-IP caps on the public POST endpoints
-
-## The AI-native feature
-
-The filter box compiles plain English ("everyone stuck on step 4 over 20 min")
-into the same structured query the manual controls produce. It is never the
-only way to filter: the state toggles, search, sort, and the advanced panel
-(More filters: stuck, step, minutes on step, progress range, spend) expose
-every predicate it compiles to, by hand.
-
-The compiler is honest about its limits: negation ("not failed") is refused
-with guidance instead of inverted, words it does not know are named back
-instead of dropped, and strict vs inclusive thresholds survive
-("under 25%" excludes a learner at exactly 25%).
-
-Canonical phrasings never touch a model: a deterministic compiler handles
-them exactly, offline, with zero setup. Free-form phrasing goes to a real
-model when one is configured. Two model paths, both OpenAI-compatible:
-
-```bash
-# Hosted demo: Groq (free tier). Server-side env var only.
-GROQ_API_KEY=... npm run dev            # model: openai/gpt-oss-120b
-
-# Or any local server, e.g. Ollama (free, runs on CPU):
-ollama pull qwen2.5:0.5b
-LLM_BASE_URL=http://127.0.0.1:11434/v1 \
-LLM_API_KEY=ollama \
-LLM_MODEL=qwen2.5:0.5b \
+```sh
+npm ci
 npm run dev
 ```
 
-The local path honors only loopback/private-network endpoints, so a hosted
-base URL set through `LLM_BASE_URL` is ignored rather than silently sending
-instructor queries to an unvetted third party. The hosted demo runs the
-model tier on Groq's free tier (openai/gpt-oss-120b); the key lives only as
-a server-side env var, and unsetting it drops the demo to the offline
-compiler - the brief's required degraded mode - with no code change.
-Per-model free-tier limits (1000 requests/min at the time of writing) sit
-far above any dashboard traffic. Neither path is required: unset them and
-everything still works offline.
+Open http://localhost:3000. For a production build, run `npm run build` and `npm start`. The app starts with seeded data and works without accounts, Azure resources, or API credentials.
 
-Model quality caveat, from testing both sizes: a 0.5B local model is often
-confidently off-topic, which the intent cross-check below catches by
-abstaining instead of showing a wrong suggestion. A larger model (the 120B
-Groq default) compiles loose phrasing correctly far more often. Either way
-the same safety contract holds: strict validation, intent cross-check,
-plain-language description, instructor confirmation before anything
-applies. When the request is vague, the model must invent a number -
-"parked on the same lesson for ages" becomes "on current step for 60+ min" -
-and that invented threshold is shown in the plain-language description and
-waits for the instructor to confirm or dismiss it. No model assumption is
-ever applied silently. Two intent hazards never reach the model at all:
-negation and cross-category "or" are terminal refusals from the offline
-compiler, because a model would happily re-interpret them and invert what
-the instructor asked for.
+## Use the dashboard
 
-Model output is never applied silently. It is validated against the schema,
-then cross-checked against the query's own intent words: output that ignores
-what the request is about is rejected with a plain abstention message
-instead of shown. Surviving output is described in plain language and
-applied only when the instructor confirms, because a small model can still
-be wrong. If the model is unreachable,
-slow, or returns invalid JSON, the endpoint says so and the manual filters
-keep working. If nothing can compile the query, a plain-language notice
-suggests phrasings that do work.
+- The **Floor map** shows the full room. Hover or focus a seat for a summary, or open it for step-by-step progress, spend, and reprovisioning. Filters highlight matching seats in place. Search accepts a learner name or seat such as `B7`.
+- **All learners** opens the dense table. Status buttons, search, sort, and **More filters** also work when the optional model is unavailable.
+- The summary reports active PCs, failures, estimated spend, and average progress. The app polls every four seconds and replays simulated state changes and billing on the server.
+- `/` focuses the plain-English filter, arrows move between seats or table rows, `r` reprovisions a focused failed environment, and `Esc` closes the details panel.
 
-## Keyboard
+**Start isolated demo** opens a freshly seeded cohort. Actions apply to that demo, and reloading the tab keeps the same demo. **Start new demo** selects a fresh cohort. **Return to shared** restores the original shared session. An isolated demo expires after 24 hours. The API rejects expired sessions and the dashboard offers a fresh demo or the shared session. Expired records remain in their storage namespace.
 
-- `/` focuses the filter box
-- Arrow keys move through table rows, or between seats on the floor map
-- `r` reprovisions the focused environment (row or seat) when it has failed
-- `Esc` closes the detail panel
+Local persistence stores the simulation start time and reprovision actions under `.data/`. Set `WORKSHOP_DATA_DIR` to point a local server at a separate data directory. Deployments configured with the existing private Vercel Blob storage path can use the same persistence interface. See [DECISIONS.md](DECISIONS.md).
 
-## Verification
+## Plain-English filters
 
-```bash
-npm install
-npm run build          # type-checks and compiles
-npx playwright install chromium
-npm start &            # serve on :3000
-npm run test:e2e       # behavioral checks against the running app
-```
+Try `everyone stuck on step 4 over 20 min`, `failed learner named Priya`, or `under 25%`. The offline compiler applies supported phrases directly. `Over` and `under` exclude the threshold. `At least` and `at most` include it. Unsupported, contradictory, or out-of-range constraints can produce a notice with manual alternatives.
 
-`scripts/e2e.mjs` drives a real browser (35 checks): risk ordering, the NL
-filter (including abstention on negation and unknown words), manual and
-advanced filters, summary/rows consistency, strict thresholds, reprovision
-reflected on next poll and by the `r` shortcut, empty / loading / error
-states, and a 390px mobile pass.
+An optional OpenAI-compatible model can suggest interpretations of freer phrasing. Configure `LLM_BASE_URL`, `LLM_MODEL`, and the provider's `LLM_API_KEY` on the server for a supported local or private-network endpoint. For Groq, supply an authorized server-side `GROQ_API_KEY` and, optionally, `GROQ_MODEL`. Leave these variables unset for offline mode. A configured provider receives the submitted filter text.
 
-`scripts/sim-test.mjs` (22 checks) exercises the simulation engine and the
-offline compiler directly with a fixed clock: cold-start determinism,
-billing that stops at the simulated deprovision time, reprovision replay,
-stuck cohort presence, and compiler edge cases.
+The route validates the full response and checks recognizable constraints in the request. The dashboard shows the proposed filter and applies it only after confirmation. The check covers supported fields and explicit phrasing, and a proposal can still misunderstand free-form text. Provider errors and timeouts leave manual controls available.
 
-`scripts/axe-check.mjs` is an axe-core audit of six key states (table
-default, detail panel open, failed filter, NL filter applied, floor map,
-floor map with a seat open). Current result: 0 violations in all six.
+## Verification and evidence
 
-The e2e suite drives the table view (`/?view=table`); the floor map reads
-the same API snapshot (`include=all` adds the full room to the response).
+See [VERIFICATION.md](VERIFICATION.md) for the exact commands, results, and screenshot checklist. The existing files in `screenshots/` and `recordings/demo-75s.mp4` are legacy captures. `scripts/shoot-stills.mjs` captures the current dashboard into `screenshots/final-*.png` and checks the full 120-row or 120-seat load before taking the dense captures.
 
 ## AI-use disclosure
 
-This project was built on 2026-11-17 with an AI coding assistant
-generating the source, tests, and documentation from the assignment brief.
-On 2026-11-18 the visual system was redesigned from a design review by
-Claude (Opus 5.5): its critique identified the real weaknesses (healthy rows
-out-shouting failures, palette leaking outside the token file, no sticky
-table header, sub-3:1 input boundaries, decorative skeleton motion), and the
-token file and component classes here implement that review.
+An AI coding assistant generated the initial source, tests, and documentation on 2026-11-17. On 2026-11-18, a design review by Claude (Opus 5.5) flagged noisy healthy rows, inconsistent color tokens, a missing sticky table header, weak input boundaries, and decorative skeleton motion. The project dropped the generic gradient cards and chart, decorative motion, and client-side mock data. The later Claude-assisted redesign introduced the cinema-style floor map and PC details panel.
 
-On 2026-11-18 a read-only code review by OpenAI Codex (gpt-6.2-sol) ran
-against the repo; its findings (poll races, shared-snapshot aggregates,
-long-gap billing, negation and clause-coverage abstention, strict
-thresholds, shortcut targeting, model-output bounds, local-only model
-configuration) are fixed in this version, with regression checks added to
-both test suites for each one.
-
-Where generic AI dashboard output was deliberately avoided, per the brief's
-"no AI slop" bar:
-
-- No four-gradient-stat-cards-plus-line-chart layout. Aggregates live in a
-  compact side rail so the 120-row table stays the main surface.
-- No client-side fake data. State, filtering, spend math, drift, and
-  mutations all live behind API routes.
-- No gradient or glass styling. Text-labeled status chips, tabular numerals,
-  motion only on state changes.
-
-Later on 2026-11-18 the UI was reworked again with Claude: the cinema-style
-floor map, the detail panel, and the side panels were added, and the
-visual style was pared back to flat, neutral surfaces.
-
-Run it and click through every flow before submitting; a review call will
-expect you to explain each file.
-
-## Screenshots
-
-The floor map: `screenshots/shot-20-floor-map-light.png`,
-`shot-20-floor-map-dark.png`, `shot-21-seat-hover.png`,
-`shot-22-pc-detail.png`, `shot-23-spend-map.png`, `shot-24-mobile-floor.png`.
-
-Earlier table-view captures against a live server under the full 120-row
-load are also in `screenshots/`: the dense risk-sorted view, the detail strip, a 390px
-mobile pass, the NL filter applied, the failed-only view, the "costing the
-most" spend sort, and the empty state.
-
-## Demo recording
-
-`recordings/demo-75s.mp4` - about 75 seconds under live load on the hosted
-deployment: the dense 120-row table drifting with the stuck cohort
-visible, the offline-compiled "stuck over 20 minutes" filter returning the
-stuck environments, the More filters panel driven manually, the FAILED
-chip, a reprovision reflected on the next poll, and the "who is costing
-the most" spend sort. Re-record with
-`node scripts/record-demo.mjs` against a running server.
-
-## Hosted demo
-
-The app deploys to Vercel (Hobby, free) with no behavior change: the
-simulation needs no database because it is recomputed deterministically
-from the seed and the clock. The only persisted state is the session anchor
-(set as `SESSION_STARTED_AT` at deploy time) and the instructor's
-reprovision actions, kept in a private Vercel Blob (free Hobby tier) as an
-append-only log - one object per action - so concurrent instances never
-overwrite each other. Warm instances re-read and merge the log every 30
-seconds (`PERSIST_REFRESH_MS`), polls in between are served from process
-memory, and a mutation that cannot be written fails with a visible error
-instead of silently reverting on the next cold start. The mutation and
-filter endpoints carry best-effort per-IP, per-instance rate limits; the
-demo is public and the data is fake.
-
-Fixture note: the recording starts from a fresh seeded session (delete
-`.data/` and restart). The seed deliberately pre-ages about 22%
-of in-use environments 20-65 minutes into their current step
-(`lib/seed.ts`), so stuck states are present from the first load; nothing
-in the video is claimed as observed real-world elapsed time. Stuck learners
-recover on their own 15-45 minutes later, and learners can stall again on
-later steps (8% of step advances draw a 22-42 minute step), so the stuck
-signal recurs instead of going dark after the seeded cohort resolves.
+An earlier read-only Codex review inspected polling, aggregates, simulation billing, filter semantics, keyboard targeting, and model configuration. This completion pass used personal Codex with `gpt-6.2-sol` at `ultra` reasoning (a final documentation wrap used `high`) to harden filter compilation and model validation, fix a stale-response race, strengthen snapshot and demo isolation, revise contrast, and extend verification. Executed checks and remaining gaps are listed in [VERIFICATION.md](VERIFICATION.md).

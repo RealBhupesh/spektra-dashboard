@@ -8,6 +8,7 @@ export type ColorMode = "status" | "spend" | "progress";
 
 const LEGEND_ORDER: SeatStatus[] = ["in_use", "stuck", "failed", "ready", "provisioning", "deprovisioned"];
 const AISLE_AFTER = 6;
+const rampFill = (pct: number) => `color-mix(in srgb, var(--seat-ramp-end) ${pct}%, var(--seat-ramp-start))`;
 
 // A cinema-style seat map: row A is nearest the instructor's screen, an aisle
 // splits the room, and each seat is one learner's PC. In Status mode a filled
@@ -116,11 +117,11 @@ export function FloorMap({
                     const style: CSSProperties & Record<string, string> = {};
                     if (mode !== "status") {
                       const t = mode === "spend" ? r.spendUsd / maxSpend : r.progressPct / 100;
-                      const pct = Math.round(6 + t * 94);
-                      const ramp = mode === "spend" ? "var(--ramp-spend)" : "var(--ramp-prog)";
-                      style["--fill"] = `color-mix(in srgb, ${ramp} ${pct}%, var(--surface))`;
-                      style["--edge"] = `color-mix(in srgb, ${ramp} ${Math.min(100, pct + 15)}%, var(--surface))`;
-                      style["--txt"] = pct > 55 ? "#fff" : "var(--ink-2)";
+                      const pct = Math.round(t * 100);
+                      style["--ramp-fill"] = rampFill(pct);
+                      // In light mode the fill reaches gray 117 at 67%. Both
+                      // text choices clear 4.5:1 around the switch point.
+                      style["--ramp-text"] = pct >= 68 ? "#ffffff" : "var(--seat-ramp-low-text)";
                     }
                     return (
                       <span key={r.id} className="contents">
@@ -180,14 +181,9 @@ export function FloorMap({
         ) : (
           <div className="flex w-full flex-wrap items-center gap-3 px-1 text-[12px] text-muted">
             <span>{mode === "spend" ? "$0" : "0%"}</span>
-            <span
-              aria-hidden
-              className="h-2 w-48 rounded-sm"
-              style={{
-                background: `linear-gradient(90deg, color-mix(in srgb, ${mode === "spend" ? "var(--ramp-spend)" : "var(--ramp-prog)"} 6%, var(--surface)), ${mode === "spend" ? "var(--ramp-spend)" : "var(--ramp-prog)"})`,
-                border: "1px solid var(--line)",
-              }}
-            />
+            <span aria-hidden className="flex h-2 w-48 overflow-hidden rounded-sm border border-line">
+              {[0, 25, 50, 75, 100].map((pct) => <span key={pct} className="flex-1" style={{ background: rampFill(pct) }} />)}
+            </span>
             <span className="tnum">{mode === "spend" ? fmtUsd(maxSpend) : "100%"}</span>
             <span className="ml-auto">{mode === "spend" ? "Darker seat = more spent so far" : "Darker seat = further through the 12 steps"}</span>
           </div>

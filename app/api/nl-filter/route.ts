@@ -1,63 +1,86 @@
+import { isIP } from "node:net";
 import { NextRequest, NextResponse } from "next/server";
-import { compileNL, describeFilter, NLResult } from "@/lib/nlparser";
-import { FilterQuery } from "@/lib/types";
+import { analyzeNL, contradictoryProgress, describeFilter, MAX_STEP_MINUTES, type NLResult } from "@/lib/nlparser";
+import { STATE_ORDER, TOTAL_STEPS, type FilterQuery } from "@/lib/types";
 import { clientKey, rateLimitOk } from "@/lib/ratelimit";
 
 export const dynamic = "force-dynamic";
 
-// Optional LLM tier. Unset by default: the repo runs fully offline on the
-// local compiler. Two model paths, both OpenAI-compatible chat completions:
-//   1. Groq (hosted): GROQ_API_KEY set -> api.groq.com, GROQ_MODEL or
-//      openai/gpt-oss-120b (default chosen because it is on the account's
-//      free-tier allowlist). The key stays server-side; only the query text
-//      is sent.
-//   2. Any local/self-hosted server (Ollama etc.): LLM_BASE_URL +
-//      LLM_API_KEY + LLM_MODEL, loopback/private-network endpoints only, so
-//      a hosted URL here is ignored rather than silently sending instructor
-//      queries to an unvetted third party.
-// Either way the model is asked for the SAME FilterQuery JSON shape,
-// strictly validated, and any failure falls back to the local compiler
-// instead of failing the dashboard.
-function isLocalBaseUrl(u: string): boolean {
+type Key = keyof FilterQuery;
+type Provider = { base: string; key: string; model: string };
+
+function isLocalBaseUrl(base: string): boolean {
   try {
-    const h = new URL(u).hostname.toLowerCase();
-    return (
-      h === "localhost" ||
-      h === "127.0.0.1" ||
-      h === "::1" ||
-      h === "[::1]" ||
-      h.endsWith(".local") ||
-      /^10\./.test(h) ||
-      /^192\.168\./.test(h) ||
-      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(h)
-    );
+    const { hostname, protocol, username, password } = new URL(base);
+    if (username || password || (protocol !== "http:" && protocol !== "https:")) return false;
+    return hostname === "localhost" || hostname === "[::1]" || hostname.endsWith(".local") ||
+      (isIP(hostname) === 4 && /^(?:127\.|10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/.test(hostname));
   } catch {
     return false;
   }
 }
 
-function llmConfig(): { base: string; key: string; model: string } | null {
+function llmConfig(): Provider | null {
   const groqKey = process.env.GROQ_API_KEY;
   if (groqKey) {
     return { base: "https://api.groq.com/openai/v1", key: groqKey, model: process.env.GROQ_MODEL || "openai/gpt-oss-120b" };
   }
-  const base = process.env.LLM_BASE_URL;
-  const key = process.env.LLM_API_KEY;
-  const model = process.env.LLM_MODEL;
-  if (base && key && model && isLocalBaseUrl(base)) return { base, key, model };
-  return null;
+  const { LLM_BASE_URL: base, LLM_API_KEY: key, LLM_MODEL: model } = process.env;
+  return base && key && model && isLocalBaseUrl(base) ? { base, key, model } : null;
 }
 
-async function tryLLM(text: string): Promise<FilterQuery | null> {
-  const cfg = llmConfig();
-  if (!cfg) return null;
-  const { base, key, model } = cfg;
+const within = (value: unknown, min: number, max: number): value is number =>
+  typeof value === "number" && Number.isFinite(value) && value >= min && value <= max;
+const isBoolean = (value: unknown) => typeof value === "boolean";
+const allowedStates = new Set<string>(STATE_ORDER);
+const sortedFields = new Set(["risk", "name", "progress", "spend", "stepMinutes"]);
+const checks: Record<Key, (value: unknown) => boolean> = {
+  states: (v) => Array.isArray(v) && v.length > 0 && v.length <= STATE_ORDER.length &&
+    new Set(v).size === v.length && v.every((s) => typeof s === "string" && allowedStates.has(s)),
+  q: (v) => typeof v === "string" && v.length >= 2 && v.length <= 60 && v === v.trim() &&
+    /\p{L}/u.test(v) && /^[\p{L}\p{N} .@'’-]+$/u.test(v),
+  step: (v) => within(v, 1, TOTAL_STEPS) && Number.isInteger(v),
+  minStepMinutes: (v) => within(v, 0, MAX_STEP_MINUTES),
+  minProgressPct: (v) => within(v, 0, 100),
+  maxProgressPct: (v) => within(v, 0, 100),
+  minSpend: (v) => within(v, 0, Number.MAX_SAFE_INTEGER),
+  minStepMinutesExclusive: isBoolean,
+  minProgressExclusive: isBoolean,
+  maxProgressExclusive: isBoolean,
+  minSpendExclusive: isBoolean,
+  stuck: (v) => v === true,
+  sort: (v) => typeof v === "string" && sortedFields.has(v),
+  order: (v) => v === "asc" || v === "desc",
+};
+const thresholdFor = {
+  minStepMinutesExclusive: "minStepMinutes",
+  minProgressExclusive: "minProgressPct",
+  maxProgressExclusive: "maxProgressPct",
+  minSpendExclusive: "minSpend",
+} as const;
+const exclusiveKeys = new Set<Key>(Object.keys(thresholdFor) as Key[]);
+
+function validateFilter(raw: unknown): FilterQuery | null {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const entries = Object.entries(raw);
+  if (!entries.length || entries.some(([k, v]) => !Object.hasOwn(checks, k) || !checks[k as Key](v))) return null;
+  const f = raw as FilterQuery;
+  if (f.order !== undefined && f.sort === undefined) return null;
+  for (const [flag, field] of Object.entries(thresholdFor)) {
+    if (f[flag as Key] !== undefined && f[field] === undefined) return null;
+  }
+  if (contradictoryProgress(f)) return null;
+  return f.sort && !f.order ? { ...f, order: "asc" } : f;
+}
+
+async function tryLLM(text: string, { base, key, model }: Provider): Promise<FilterQuery | null> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 9000); // slow first token must not stall the filter
+  const timeout = setTimeout(() => controller.abort(), 9000);
   try {
     const res = await fetch(`${base.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       signal: controller.signal,
+      redirect: "error",
       headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
       body: JSON.stringify({
         model,
@@ -66,137 +89,103 @@ async function tryLLM(text: string): Promise<FilterQuery | null> {
         messages: [
           {
             role: "system",
-            content:
-              'Convert an instructor dashboard filter request into JSON. Optional keys: states (array of provisioning|ready|in_use|failed|deprovisioned), q (name search string), step (1-12), minStepMinutes (number), minProgressPct (0-100), maxProgressPct (0-100), minSpend (number), stuck (boolean). Only include keys the request actually asks for. Output JSON only, no explanation.',
+            content: [
+              "Convert the workshop filter request into a JSON object. Include only requested constraints, or output {} if unsupported.",
+              "Fields: states (array of provisioning|ready|in_use|failed|deprovisioned), q (learner search), step (integer 1–12), minStepMinutes (0–600), minProgressPct and maxProgressPct (0–100), minSpend (USD, nonnegative), stuck (true), sort (risk|name|progress|spend|stepMinutes), order (asc|desc).",
+              "For a strict threshold use the relevant flag: minStepMinutesExclusive, minProgressExclusive, maxProgressExclusive, minSpendExclusive. Preserve the threshold and every clause. Output JSON only.",
+            ].join(" "),
           },
-          { role: "user", content: "everyone stuck on step 4 over 20 min" },
-          { role: "assistant", content: '{"stuck":true,"step":4,"minStepMinutes":20}' },
-          { role: "user", content: "failed environments" },
-          { role: "assistant", content: '{"states":["failed"]}' },
-          { role: "user", content: "learners who barely made any progress" },
-          { role: "assistant", content: '{"maxProgressPct":15}' },
-          { role: "user", content: "show me the big spenders" },
-          { role: "assistant", content: '{"minSpend":5}' },
-          { role: "user", content: "students who finished everything" },
-          { role: "assistant", content: '{"states":["deprovisioned"]}' },
           { role: "user", content: text },
         ],
       }),
     });
     if (!res.ok) return null;
     const data = await res.json();
-    const raw = JSON.parse(data?.choices?.[0]?.message?.content ?? "{}");
-    // Strict validation: keep only known keys with sane types.
-    const out: FilterQuery = {};
-    const validStates = new Set(["provisioning", "ready", "in_use", "failed", "deprovisioned"]);
-    if (Array.isArray(raw.states)) {
-      const s = raw.states.filter((x: unknown) => typeof x === "string" && validStates.has(x));
-      if (s.length) out.states = s;
-    }
-    // Reject degenerate or impossible values a small model emits when
-    // guessing: no-ops (min*: 0, maxProgressPct: 100), query-killers
-    // (q "0"), fractional steps, steps beyond the lab guide, out-of-range
-    // percentages, and contradictory progress bounds.
-    if (typeof raw.q === "string" && raw.q.length >= 2 && raw.q.length <= 60) out.q = raw.q;
-    if (typeof raw.step === "number" && Number.isInteger(raw.step) && raw.step >= 1 && raw.step <= 12) out.step = raw.step;
-    if (typeof raw.minStepMinutes === "number" && Number.isFinite(raw.minStepMinutes) && raw.minStepMinutes > 0 && raw.minStepMinutes <= 600) {
-      out.minStepMinutes = raw.minStepMinutes;
-    }
-    if (typeof raw.minProgressPct === "number" && Number.isFinite(raw.minProgressPct) && raw.minProgressPct > 0 && raw.minProgressPct <= 100) {
-      out.minProgressPct = raw.minProgressPct;
-    }
-    if (typeof raw.maxProgressPct === "number" && Number.isFinite(raw.maxProgressPct) && raw.maxProgressPct >= 0 && raw.maxProgressPct < 100) {
-      out.maxProgressPct = raw.maxProgressPct;
-    }
-    if (
-      typeof out.minProgressPct === "number" &&
-      typeof out.maxProgressPct === "number" &&
-      out.minProgressPct > out.maxProgressPct
-    ) {
-      delete out.minProgressPct;
-      delete out.maxProgressPct;
-    }
-    if (typeof raw.minSpend === "number" && Number.isFinite(raw.minSpend) && raw.minSpend > 0) out.minSpend = raw.minSpend;
-    if (raw.stuck === true) out.stuck = true;
-    return Object.keys(out).length ? out : null;
+    const content = data?.choices?.[0]?.message?.content;
+    return typeof content === "string" && content.length <= 4096 ? validateFilter(JSON.parse(content)) : null;
   } catch {
-    return null; // model down, slow, or bad JSON: degrade, never break
+    return null;
   } finally {
     clearTimeout(timeout);
   }
 }
 
-// Map query vocabulary to the FilterQuery keys a correct compilation would
-// use. Small local models are confidently wrong often enough that output
-// which ignores the query's own intent words is rejected instead of shown.
-function intentHints(text: string): Set<string> {
-  const t = text.toLowerCase();
-  const keys = new Set<string>();
-  if (/progress|done|complete|finish|barely|started|behind|ahead|far along/.test(t)) {
-    keys.add("minProgressPct").add("maxProgressPct");
+// Each recognizable request topic must have a corresponding field. This
+// vocabulary is intentionally limited; confirmation still covers ambiguity.
+const topics: { words: RegExp; keys: Key[]; sort?: FilterQuery["sort"] }[] = [
+  { words: /\b(?:progress(?:ed)?|ahead|behind|barely|percent|done|completion)\b|%/i, keys: ["minProgressPct", "maxProgressPct"], sort: "progress" },
+  { words: /\b(?:stuck|blocked|slow|waiting|long|idle|parked|lingering|ages|forever)\b|\bsame\s+(?:step|lesson|stage)\b/i, keys: ["stuck", "minStepMinutes"], sort: "stepMinutes" },
+  { words: /\bstep\s*\d/i, keys: ["step"] },
+  { words: /\d(?:\.\d+)?\s*(?:mins?|minutes?)\b/i, keys: ["minStepMinutes"] },
+  { words: /\b(?:cost\w*|spend\w*|spent|bill\w*|expensive|price|budget|spenders?)\b|\$/i, keys: ["minSpend"], sort: "spend" },
+  { words: /\b(?:fail\w*|errors?|malfunction\w*|crash\w*|ready|provisioning|deprovisioned|in[-_ ]use|working|finished|powered off)\b/i, keys: ["states"] },
+  { words: /\b(?:named|name is|called|learner|student)\s+\p{Lu}[\p{L}'’-]+/u, keys: ["q"] },
+  { words: /\b(?:alphabetical(?:ly)?|by name)\b/i, keys: [], sort: "name" },
+  { words: /\b(?:risk order|by risk)\b/i, keys: [], sort: "risk" },
+];
+const sorting = /\b(?:sort\w*|order\w*|rank\w*|highest|lowest|longest|shortest|top|most|least|alphabetical\w*|by (?:name|risk))\b/i;
+
+function matchesIntent(text: string, f: FilterQuery, explicit: FilterQuery): boolean {
+  const known = new Set<Key>(Object.keys(explicit) as Key[]);
+  for (const key of known) {
+    if (key === "states") {
+      if (f.states?.length !== explicit.states?.length || !explicit.states?.every((s) => f.states?.includes(s))) return false;
+    } else if (key === "q") {
+      if (f.q?.toLowerCase() !== explicit.q?.toLowerCase()) return false;
+    } else if (exclusiveKeys.has(key)) {
+      if (Boolean(f[key]) !== Boolean(explicit[key])) return false;
+    } else if (f[key] !== explicit[key]) {
+      return false;
+    }
   }
-  if (/stuck|blocked|slow|waiting|long|idle|parked|lingering|ages|forever|same\s+(step|lesson|stage)/.test(t)) keys.add("stuck").add("minStepMinutes");
-  if (/step\s*\d/.test(t)) keys.add("step");
-  if (/\d+\s*(min|mins|minutes|hour|hours)/.test(t)) keys.add("minStepMinutes");
-  if (/cost|spend|spent|bill|\$|expensive|price|budget|burning/.test(t)) keys.add("minSpend");
-  if (/fail|break|error|down|crash/.test(t)) keys.add("states");
-  if (/ready|provision|deprovision|in use|active|finished|done|complete/.test(t)) keys.add("states");
-  if (/named|name|called|env-\d+|^[a-z]+ [a-z]+$/.test(t)) keys.add("q");
-  return keys;
+
+  const needed = topics.filter(({ words }) => words.test(text));
+  if (!needed.length && !known.size) return false;
+  if (/\b(?:barely|behind|little progress)\b/i.test(text) && f.maxProgressPct === undefined) return false;
+  if (/\b(?:highest|descending|longest)\b/i.test(text) && f.sort && f.order !== "desc") return false;
+  if (/\b(?:lowest|ascending|shortest)\b/i.test(text) && f.sort && f.order !== "asc") return false;
+  for (const { keys, sort } of needed) {
+    const requestedSort = sort !== undefined && f.sort === sort && sorting.test(text);
+    const matched = keys.some((key) => f[key] !== undefined) || requestedSort;
+    if (!matched) return false;
+    keys.forEach((key) => known.add(key));
+    if (requestedSort) {
+      known.add("sort");
+      known.add("order");
+    }
+  }
+  if (/\band\b/i.test(text) && text.split(/\band\b/i).some((part) =>
+    !topics.some(({ words }) => words.test(part)) && !Object.keys(analyzeNL(part).explicit).length)) return false;
+
+  return (Object.keys(f) as Key[]).every((key) => known.has(key) ||
+    (exclusiveKeys.has(key) && known.has(thresholdFor[key as keyof typeof thresholdFor])));
 }
 
 export async function POST(req: NextRequest) {
-  // The endpoint is public in the demo; cap per-client request rate so a
-  // script cannot hammer the model tier (or the compiler) in a loop.
   if (!rateLimitOk(`nl:${clientKey(req)}`, 60, 60_000)) {
     return NextResponse.json({ error: "rate_limited" }, { status: 429 });
   }
-  let text = "";
+  let text: string;
   try {
     const body = await req.json();
-    text = typeof body?.text === "string" ? body.text.slice(0, 300) : "";
+    if (typeof body?.text !== "string" || !body.text.trim()) return NextResponse.json({ error: "empty_query" }, { status: 400 });
+    text = body.text.trim();
+    if (text.length > 300) return NextResponse.json({ error: "query_too_long" }, { status: 400 });
   } catch {
     return NextResponse.json({ error: "bad_request" }, { status: 400 });
   }
-  if (!text.trim()) {
-    return NextResponse.json({ error: "empty_query" }, { status: 400 });
-  }
 
-  // Tier 1: the deterministic compiler handles the canonical phrasings and
-  // is always right about what it matched.
-  const local = compileNL(text);
-  if (local.ok) return NextResponse.json(local);
-  // Intent-safety refusals (negation, cross-category "or") are terminal: a
-  // model would happily re-interpret the query and silently invert intent,
-  // which is exactly what these refusals exist to prevent.
-  if (local.terminal) return NextResponse.json(local);
+  const { result: local, explicit } = analyzeNL(text);
+  if (local.ok || local.terminal) return NextResponse.json(local);
+  const provider = llmConfig();
+  if (!provider) return NextResponse.json(local);
 
-  // Tier 2: the model (when configured) handles free-form phrasing. Its
-  // output is described in plain language and must be confirmed in the UI
-  // before it is applied - a small local model can be confidently wrong.
-  const llm = await tryLLM(text);
-  if (llm) {
-    const hints = intentHints(text);
-    const modelKeys = Object.keys(llm).filter((k) => k !== "sort");
-    const onTopic = hints.size > 0 && modelKeys.some((k) => hints.has(k));
-    if (!onTopic) {
-      // Semantics check failed: the model ignored what the query is about.
-      // Abstain plainly rather than show a schema-valid but wrong filter.
-      return NextResponse.json({
-        ok: false,
-        filter: {},
-        description: [],
-        confidence: 0,
-        source: "llm",
-        degraded: false,
-        message:
-          "The model could not confidently map that onto dashboard fields (state, step, time on step, progress %, spend, or a learner name). Try naming one of those, e.g. \"under 20% done\" or \"costing over $6\".",
-      } satisfies NLResult);
-    }
+  const candidate = await tryLLM(text, provider);
+  if (candidate && matchesIntent(text, candidate, explicit)) {
     const result: NLResult = {
       ok: true,
-      filter: { ...llm, sort: "risk" },
-      description: describeFilter(llm),
+      filter: { sort: "risk", ...candidate },
+      description: describeFilter(candidate),
       confidence: 0.7,
       source: "llm",
       degraded: false,
@@ -204,11 +193,10 @@ export async function POST(req: NextRequest) {
     };
     return NextResponse.json(result);
   }
-
-  // Nothing compiled the query: fail safe, manual filters keep working.
-  if (llmConfig()) {
-    local.source = "llm-fallback-local";
-    local.degraded = true;
-  }
-  return NextResponse.json(local);
+  return NextResponse.json({
+    ...local,
+    source: "llm-fallback-local",
+    degraded: true,
+    message: "The optional model could not suggest a supported filter. Try an exact phrase or use More filters.",
+  } satisfies NLResult);
 }

@@ -1,70 +1,87 @@
-// Regenerates the seven packaged screenshots against the running app.
-// Usage: npm start &  then  node scripts/shoot-stills.mjs
+// Capture the current dashboard against a running app.
+// Set MOCK_MODEL=1 only when the app uses the loopback test provider.
 import { chromium } from "playwright";
-const BASE = process.env.BASE_URL || "http://localhost:3000";
+
+const base = process.env.BASE_URL || "http://localhost:3000";
 const browser = await chromium.launch();
-const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
-const wait = (ms) => page.waitForTimeout(ms);
+const viewport = { width: 1440, height: 900 };
+const floorSeats = ".seat[data-env-id]";
+const tableRows = "tbody tr[data-env-id]";
+const capture = (page, name) => page.screenshot({ path: `screenshots/final-${name}.png`, animations: "disabled" });
+const fullCohort = (page, selector) => page.waitForFunction((selector) => document.querySelectorAll(selector).length === 120, selector);
+const open = (page, path) => page.goto(`${base}${path}`, { waitUntil: "domcontentloaded" });
+const environmentApi = (url) => url.pathname === "/api/environments";
 
-await page.goto(`${BASE}/?view=table`, { waitUntil: "networkidle" });
-await page.waitForSelector(".ops-table tbody tr", { timeout: 15000 });
-await wait(1500);
-await page.screenshot({ path: "screenshots/shot-11-redesign-dense.png" });
+try {
+  const floor = await browser.newPage({ viewport, colorScheme: "light" });
+  await open(floor, "/");
+  await floor.getByRole("button", { name: "Start isolated demo" }).click();
+  await floor.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
+  await fullCohort(floor, floorSeats);
+  await capture(floor, "floor-light");
+  await floor.locator('.seat[data-st="failed"]').first().click();
+  await floor.getByRole("region", { name: /^Details for/ }).waitFor();
+  await capture(floor, "detail");
+  await floor.keyboard.press("Escape");
+  await floor.getByRole("button", { name: "Switch to dark theme" }).click();
+  await capture(floor, "floor-dark");
+  await floor.getByRole("button", { name: "Spend", exact: true }).click();
+  await capture(floor, "spend-dark");
 
-// Detail strip: select a row, bring the strip fully into view
-await page.click(".ops-table tbody tr");
-await wait(500);
-await page.locator("section", { hasText: "Reprovision environment" }).first().scrollIntoViewIfNeeded();
-await wait(400);
-await page.screenshot({ path: "screenshots/shot-12-redesign-detail.png" });
-await page.keyboard.press("Escape");
+  const table = await browser.newPage({ viewport, colorScheme: "light" });
+  let finishLoading;
+  const hold = new Promise((resolve) => { finishLoading = resolve; });
+  await table.route(environmentApi, async (route) => { await hold; await route.continue(); });
+  try {
+    await open(table, "/?view=table");
+    await table.locator(".ops-table .skeleton").first().waitFor();
+    await capture(table, "loading");
+  } finally {
+    const loaded = table.waitForResponse((response) => new URL(response.url()).pathname === "/api/environments");
+    finishLoading();
+    await loaded;
+    await table.unroute(environmentApi, undefined, { behavior: "wait" });
+  }
+  await fullCohort(table, tableRows);
+  await capture(table, "table");
 
-// NL filter (stuck cohort visible on a fresh seed)
-await page.goto(`${BASE}/?view=table`, { waitUntil: "networkidle" });
-await page.waitForSelector(".ops-table tbody tr", { timeout: 15000 });
-await page.fill('input[aria-label="Natural language filter"]', "everyone stuck over 20 minutes");
-await page.keyboard.press("Enter");
-await page.waitForSelector("text=Filter:", { timeout: 8000 });
-await wait(1200);
-await page.screenshot({ path: "screenshots/shot-14-redesign-nl-filter.png" });
-await page.click("text=Clear filter");
-await wait(800);
+  await table.route(environmentApi, (route) => route.abort());
+  await table.getByRole("alert").filter({ hasText: "Live data unavailable" }).waitFor();
+  await capture(table, "error");
+  await table.unroute(environmentApi);
+  await table.getByRole("button", { name: "Retry now" }).click();
+  await table.getByRole("alert").filter({ hasText: "Live data unavailable" }).waitFor({ state: "hidden" });
 
-// Failed-only
-await page.click('button:has-text("FAILED")');
-await wait(1000);
-await page.screenshot({ path: "screenshots/shot-15-redesign-failed.png" });
-await page.click('button:has-text("FAILED")');
-await wait(800);
+  const search = table.getByRole("textbox", { name: "Search learner" });
+  await search.fill("zz-no-such-learner");
+  await table.getByText("No environments match these filters.", { exact: false }).first().waitFor();
+  await capture(table, "empty");
+  await table.getByRole("button", { name: "Clear all filters" }).click();
+  await fullCohort(table, tableRows);
 
-// Spend sort
-await page.selectOption("select", "spend");
-await wait(1000);
-await page.screenshot({ path: "screenshots/shot-16-redesign-spend-sort.png" });
-await page.selectOption("select", "risk");
-await wait(500);
+  const nl = table.getByRole("textbox", { name: "Natural language filter" });
+  if (process.env.MOCK_MODEL === "1") {
+    await nl.fill("learners who barely made any progress");
+    await nl.press("Enter");
+    const confirm = table.getByRole("button", { name: "Apply suggested filter" });
+    await confirm.waitFor();
+    await fullCohort(table, tableRows);
+    await capture(table, "mock-model-confirmation");
+    await confirm.click();
+    await table.getByText("compiled by the AI model, confirmed by you", { exact: false }).waitFor();
+    await table.getByRole("button", { name: "Clear filter" }).click();
+  }
+  await nl.fill("learners who have barely progressed");
+  await nl.press("Enter");
+  await table.locator(".note-warn[role=alert]").waitFor();
+  await table.getByRole("button", { name: "More filters" }).click();
+  await capture(table, "model-fallback");
 
-// Advanced "More filters" panel, with one control engaged
-await page.click('button:has-text("More filters")');
-await wait(400);
-await page.click('label:has-text("Stuck 20m+ only")');
-await wait(1200);
-await page.screenshot({ path: "screenshots/shot-18-redesign-more-filters.png" });
-await page.click('button:has-text("Reset")');
-await page.click('button:has-text("More filters")');
-await wait(600);
-
-// Empty state
-await page.fill('input[placeholder="Search learner"]', "nobody-by-this-name");
-await wait(1000);
-await page.screenshot({ path: "screenshots/shot-17-redesign-empty.png" });
-
-// Mobile
-const mob = await browser.newPage({ viewport: { width: 390, height: 844 } });
-await mob.goto(BASE, { waitUntil: "networkidle" });
-await mob.waitForSelector(".ops-table tbody tr", { timeout: 15000 });
-await mob.waitForTimeout(1200);
-await mob.screenshot({ path: "screenshots/shot-13-redesign-mobile.png" });
-
-await browser.close();
-console.log("STILLS DONE");
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 }, colorScheme: "light" });
+  await open(mobile, "/");
+  await fullCohort(mobile, floorSeats);
+  await capture(mobile, "mobile");
+  console.log(`Captured ${process.env.MOCK_MODEL === "1" ? 11 : 10} screenshots, with all 120 seats and rows loaded for dense views.`);
+} finally {
+  await browser.close();
+}

@@ -14,12 +14,14 @@ const ok = (name, cond, extra = "") => {
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
-// 1. Loads with the full dense dataset
+// 1. Load all 120 rows in a fresh isolated demo, preserving shared data.
 await page.goto(`${BASE}/?view=table`, { waitUntil: "domcontentloaded" });
-await page.waitForSelector("tbody tr td", { timeout: 20000 });
-await page.waitForTimeout(2500); // let a poll land
+await page.getByRole("button", { name: "Start isolated demo" }).click();
+await page.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
+await page.waitForFunction(() => document.querySelectorAll("tbody tr[data-env-id]").length === 120);
 let rows = await page.locator("tbody tr").count();
-ok("dense load renders ~120 rows", rows >= 100, `got ${rows}`);
+ok("dense load renders all 120 rows", rows === 120, `got ${rows}`);
+ok("isolated demo is visibly labeled as simulated", await page.getByText("Isolated demo · Simulated data", { exact: true }).isVisible());
 ok("summary shows spend", /\$[0-9]/.test(await page.locator("header").innerText()));
 
 // 2. Risk order: first visible row is FAILED
@@ -35,6 +37,35 @@ const nlCount = await page.locator("tbody tr").count();
 ok("NL filter narrows results", nlCount > 0 && nlCount < 120, `got ${nlCount}`);
 await page.click("text=Clear filter");
 await page.waitForTimeout(800);
+
+// A delayed fetch may still resolve after cancellation. Release it after
+// clearing an applied filter and make sure it cannot restore stale state.
+const nlInput = page.getByRole("textbox", { name: "Natural language filter" });
+await nlInput.fill("failed");
+await nlInput.press("Enter");
+await page.getByRole("button", { name: "Clear filter", exact: true }).waitFor();
+await page.evaluate(() => {
+  const originalFetch = window.fetch;
+  window.fetch = (input, init) => {
+    if (input !== "/api/nl-filter" || JSON.parse(init?.body ?? "{}").text !== "ready") {
+      return originalFetch(input, init);
+    }
+    return new Promise((resolve) => {
+      window.releaseDelayedFilter = () => {
+        window.fetch = originalFetch;
+        resolve(Response.json({ ok: true, filter: { states: ["ready"] }, description: ["state is ready"], source: "local-parser" }));
+        return init.signal?.aborted;
+      };
+    });
+  };
+});
+await nlInput.fill("ready");
+await nlInput.press("Enter");
+await page.waitForFunction(() => Boolean(window.releaseDelayedFilter));
+await page.getByRole("button", { name: "Clear filter", exact: true }).click();
+ok("clear aborts the pending NL request", await page.evaluate(() => window.releaseDelayedFilter()));
+await page.waitForFunction(() => document.querySelectorAll("tbody tr[data-env-id]").length === 120);
+ok("a delayed NL response cannot restore the cleared filter", !await page.getByRole("button", { name: "Clear filter", exact: true }).count());
 
 // 3b. Cross-category "or" must NOT be silently ANDed: a warning shows instead
 await page.fill('input[aria-label="Natural language filter"]', "failed or stuck under 40%");
@@ -103,6 +134,11 @@ await page.click("tbody tr:first-child >> text=Reprovision");
 await page.waitForTimeout(5000);
 const stillThere = await page.locator(`tbody tr:has-text("${targetId.trim()}")`).count();
 ok("reprovision removes env from failed list", stillThere === 0, `${targetId} still listed`);
+await page.reload({ waitUntil: "domcontentloaded" });
+await page.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
+const reprovisioned = page.locator(`tbody tr[data-env-id="${targetId.trim()}"]`);
+await reprovisioned.waitFor();
+ok("reloading this tab keeps the isolated demo action", !/failed/i.test(await reprovisioned.locator("td").first().innerText()));
 
 // 6. Keyboard: "/" focuses the NL filter; arrows move into the table
 await page.keyboard.press("/");
@@ -154,13 +190,12 @@ const bandWidth = await mob.evaluate(() => {
   return band ? band.getBoundingClientRect().width : 0;
 });
 ok("mobile command band stacks full-width above table", bandWidth >= 350, `band ${bandWidth}px`);
-await mob.screenshot({ path: "screenshots/spektra-shot-8-mobile.png", fullPage: false });
 await mob.close();
 
 // 11. Rows and summary come from one snapshot: counts always agree
 const sess = await (await fetch(`${BASE}/api/session`)).json();
 const fJson = await (await fetch(`${BASE}/api/environments?states=failed`)).json();
-ok("summary failures match filtered failed rows", fJson.filtered === sess.byState.failed && sess.failures === sess.byState.failed, `${fJson.filtered} vs ${sess.failures}/${sess.byState.failed}`);
+ok("summary failures match filtered failed rows in the same snapshot", fJson.filtered === fJson.summary.byState.failed && fJson.summary.failures === fJson.filtered && sess.failures === sess.byState.failed);
 const eJson = await (await fetch(`${BASE}/api/environments`)).json();
 ok("environments response embeds the session summary", typeof eJson.summary?.estimatedSpend === "number");
 
@@ -218,6 +253,26 @@ if (readyId) {
 const allEnv = (await (await fetch(`${BASE}/api/environments`)).json()).environments;
 const inUse100 = allEnv.filter((r) => r.state === "in_use" && r.progressPct >= 100);
 ok("no in_use env shows 100% progress", inUse100.length === 0, `${inUse100.length}`);
+
+// Optional browser pass against the local HTTP mock provider.
+if (process.env.MOCK_MODEL === "1") {
+  await nlInput.fill("learners who barely made any progress");
+  await nlInput.press("Enter");
+  const confirmation = page.getByRole("button", { name: "Apply suggested filter" });
+  await confirmation.waitFor();
+  ok("model suggestion leaves all 120 rows until confirmed", await page.locator("tbody tr[data-env-id]").count() === 120);
+  await confirmation.click();
+  await page.getByText("compiled by the AI model, confirmed by you", { exact: false }).waitFor();
+  await page.waitForFunction(() => document.querySelectorAll("tbody tr[data-env-id]").length < 120);
+  ok("confirming the model suggestion narrows results", await page.locator("tbody tr[data-env-id]").count() > 0);
+  await page.getByRole("button", { name: "Clear filter", exact: true }).click();
+  await nlInput.fill("learners who have barely progressed");
+  await nlInput.press("Enter");
+  await page.getByRole("alert").filter({ hasText: "The optional model could not suggest" }).waitFor();
+  await page.locator('.chip[data-st="failed"]').click();
+  await page.waitForFunction(() => !document.querySelector('tbody tr[data-st]:not([data-st="failed"])'));
+  ok("manual Failed filter still works after optional provider failure", await page.locator("tbody tr[data-env-id]").count() > 0);
+}
 
 await browser.close();
 console.log(`\n${passed} passed, ${failed} failed`);

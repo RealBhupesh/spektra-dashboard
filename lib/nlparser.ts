@@ -1,4 +1,4 @@
-import { EnvState, FilterQuery } from "./types";
+import { EnvState, FilterQuery, TOTAL_STEPS } from "./types";
 
 // Human-readable summary of a compiled filter, used for both the local
 // compiler and for describing LLM output before it is applied.
@@ -20,7 +20,9 @@ export function describeFilter(f: FilterQuery): string[] {
     d.push(f.minSpendExclusive ? `spend over $${f.minSpend}` : `spend at least $${f.minSpend}`);
   }
   if (f.q) d.push(`name contains "${f.q}"`);
-  if (f.sort && f.sort !== "risk" && f.sort !== "name") {
+  if (f.sort === "name") d.push(`sorted by learner name, ${f.order === "desc" ? "Z to A" : "A to Z"}`);
+  else if (f.sort === "risk") d.push(`sorted by risk, ${f.order === "desc" ? "lowest" : "highest"} first`);
+  else if (f.sort) {
     d.push(`sorted by ${f.sort === "stepMinutes" ? "time on current step" : f.sort}, ${f.order === "desc" ? "highest" : "lowest"} first`);
   }
   return d;
@@ -46,193 +48,170 @@ export interface NLResult {
 
 const STATE_WORDS: [RegExp, EnvState][] = [
   [/\bfail(?:ed|ing|ures?)?\b/i, "failed"],
-  [/\bin[- ]?use\b|\bactive\b|\bworking\b/i, "in_use"],
+  [/\bin[-_ ]?use\b|\bworking\b/i, "in_use"],
   [/\bready\b/i, "ready"],
   [/\bprovisioning\b|\bspinning up\b|\bstarting up\b/i, "provisioning"],
   [/\bdeprovisioned\b/i, "deprovisioned"],
 ];
 
-// Words the compiler understands as sentence structure, not filter content.
 const FILLER = new Set(
   `show me all everyone every any the a an of who are is that with and get list give find learners learner students student
    environments environment env envs labs lab people folks please on in for to their them currently right now much many how
-   what which whose still been have has had do does did just only there here see want need display sort sorted order by
-   step steps min mins minutes minute hour hours percent done complete completed completion progress costing cost costs spend
-   spends spent spending bill bills billed expensive most highest biggest top largest over under more less than above below
-   least older waiting long slow idle blocked moving stuck failed failing failure failures ready active working provisioning
-   spinning starting deprovisioned use named name called or`.split(/\s+/),
+   what which whose still been have has had do does did just only there here see want need display`.split(/\s+/),
 );
 
-function abstain(message: string, terminal = false): NLResult {
-  return { ok: false, filter: {}, description: [], confidence: 0, source: "local-parser", degraded: false, terminal, message };
+const NUMBER = String.raw`\d+(?:\.\d+)?`;
+const LOWER = String.raw`\bover|\bmore than|\bolder than|\babove|\bat least|>=|>`;
+const UPPER = String.raw`\bunder|\bless than|\bbelow|\bat most|<=|<`;
+const PERCENT = String.raw`\s*(?:%(?![\p{L}\p{N}])|percent\b)(?:\s+(?:done|complete(?:d)?|of progress)\b)?`;
+const SPEND_SORT = /\bmost\s+expensive\b|\b(?:cost|spend|bill)(?:ing|s|ed)?\s+the\s+(?:most|highest)\b|\b(?:highest|biggest|top|largest)\s+(?:spend|spenders?|costs?|bills?)\b|\bspend(?:er|ing)?s?\s+(?:the\s+)?most\b/i;
+const NAME_END = /^(?:who|that|the|with|and|or|on|for|over|under|at|more|less|than|failed|stuck|blocked|ready|active|working|provisioning|deprovisioned|in|costing|spending)$/i;
+export const MAX_STEP_MINUTES = 600;
+
+export function contradictoryProgress(f: FilterQuery): boolean {
+  const { minProgressPct: min, maxProgressPct: max, minProgressExclusive, maxProgressExclusive } = f;
+  return (min === 100 && !!minProgressExclusive) || (max === 0 && !!maxProgressExclusive) ||
+    (min !== undefined && max !== undefined && (min > max || (min === max && !!(minProgressExclusive || maxProgressExclusive))));
 }
 
-// Deterministic local compiler for the phrasings instructors actually type.
-// It is the always-available tier: an LLM (when configured) may produce the
-// same FilterQuery shape, but the dashboard never depends on the model.
-// Two hard rules keep it honest:
-//   - anything it does not understand (negation, unknown words) makes it
-//     abstain instead of silently dropping that part of the request;
-//   - it never guesses: a partial match reports exactly what it matched.
 export function compileNL(input: string): NLResult {
+  return analyzeNL(input).result;
+}
+
+// On free-form input, retain the exact recognized clauses for validation of
+// a proposed model filter. The HTTP response exposes only a completed filter.
+export function analyzeNL(input: string): { result: NLResult; explicit: FilterQuery } {
   const text = input.trim();
   const filter: FilterQuery = {};
-  let matched = 0;
   const categories = new Set<string>();
-  // Working copy; each matched clause's span is blanked out so the final
-  // coverage check can spot words no clause claimed.
   let rest = ` ${text} `;
-  const claim = (m: RegExpMatchArray) => {
-    if (typeof m.index === "number") rest = rest.slice(0, m.index) + " ".repeat(m[0].length) + rest.slice(m.index + m[0].length);
+  const blank = (start: number, length: number) => {
+    rest = rest.slice(0, start) + " ".repeat(length) + rest.slice(start + length);
+  };
+  const claim = (m: RegExpMatchArray) => blank(m.index!, m[0].length);
+  const refuse = (message: string, terminal = false) => ({
+    result: { ok: false, filter: {}, description: [], confidence: 0, source: "local-parser", degraded: false, terminal, message } as NLResult,
+    explicit: filter,
+  });
+  const invalid = () => refuse("That request has an unsupported, repeated, or out-of-range constraint. Try one condition per field using More filters.", true);
+  const negProbe = text.replace(/\b(?:not moving|no progress)\b/gi, " ");
+  if (/\b(?:not|no|never|neither|nor|except|excluding|without|other than)\b|n['’]t\b/i.test(negProbe)) {
+    return refuse('I cannot compile negation safely. Try the state you want to see, or use the state buttons.', true);
+  }
+
+  // Recognize explicit learner names before interpreting state words.
+  const nameMark = rest.match(/\b(?:named|name is|called)\b/i);
+  if (nameMark) {
+    const start = nameMark.index! + nameMark[0].length;
+    const name = rest.slice(start).match(/^(\s+)([\p{L}]['’\p{L}-]*(?:[ \t]+[\p{L}]['’\p{L}-]*){0,2})/u);
+    const words = [...(name?.[2].matchAll(/\S+/g) ?? [])];
+    const end = words.findIndex(([word]) => NAME_END.test(word));
+    const selected = end === -1 ? words : words.slice(0, end);
+    const candidate = selected.map(([word]) => word).join(" ");
+    const last = selected.at(-1);
+    if (!name || !last || candidate.length < 2 || candidate.length > 60) {
+      return refuse('I could not read a learner name. Try "learner Priya" or use the search box.', true);
+    }
+    blank(nameMark.index!, nameMark[0].length + name[1].length + last.index + last[0].length);
+    filter.q = candidate;
+    categories.add("name");
+  }
+
+  const states: { state: EnvState; start: number; end: number }[] = [];
+  for (const [re, state] of STATE_WORDS) {
+    const m = rest.match(re);
+    if (!m) continue;
+    states.push({ state, start: m.index!, end: m.index! + m[0].length });
+    claim(m);
+  }
+  if (states.length) {
+    states.sort((a, b) => a.start - b.start);
+    if (states.slice(1).some((s, i) => !/\bor\b/i.test(rest.slice(states[i].end, s.start)) || /\band\b/i.test(rest.slice(states[i].end, s.start)))) {
+      return refuse('Use "or" between alternative states, or choose one state.', true);
+    }
+    filter.states = states.map((s) => s.state);
+    categories.add("state");
+  }
+  const stuck = rest.match(/\b(?:stuck|blocked|not moving|no progress)\b/i);
+  if (stuck) {
+    filter.stuck = true;
+    categories.add("stuck");
+    claim(stuck);
+  }
+
+  const step = rest.match(new RegExp(String.raw`\bstep\s*(${NUMBER})(?![\p{L}\p{N}]|\.\d)`, "iu"));
+  if (step) {
+    const n = Number(step[1]);
+    if (!Number.isInteger(n) || n < 1 || n > TOTAL_STEPS) return invalid();
+    filter.step = n;
+    categories.add("step");
+    claim(step);
+  }
+
+  const bound = (pattern: RegExp, key: "minStepMinutes" | "minProgressPct" | "maxProgressPct" | "minSpend",
+    exclusive: "minStepMinutesExclusive" | "minProgressExclusive" | "maxProgressExclusive" | "minSpendExclusive",
+    category: string, max: number, suffix?: RegExp) => {
+    const prefix = rest.match(pattern);
+    const m = prefix ?? (suffix && rest.match(suffix));
+    if (!m) return true;
+    const n = Number(prefix ? m[2] ?? m[4] : m[1]);
+    if (!Number.isFinite(n) || n > max) return false;
+    filter[key] = n;
+    filter[exclusive] = !!prefix && !/^(?:at (?:least|most)|>=|<=)$/i.test(m[1] ?? m[3]);
+    categories.add(category);
+    claim(m);
+    return true;
   };
 
-  // Negation changes meaning ("not failed" is not "failed"), and dropping it
-  // silently inverts the instructor's intent. Abstain instead. The stuck
-  // idioms "not moving" / "no progress" are whitelisted first.
-  const negProbe = text.replace(/not moving|no progress/gi, " ");
-  if (/\bnot\b|\bnever\b|\bn't\b|\bexcept\b|\bexcluding\b|\bwithout\b|\bother than\b/i.test(negProbe)) {
-    return abstain(
-      'I cannot compile negation safely. Say what you want to see instead - e.g. "ready" rather than "not failed" - or use the state buttons.',
-      true,
-    );
-  }
+  if (!bound(new RegExp(String.raw`(${LOWER})\s*(${NUMBER})\s*(?:min|mins|minutes?)\b`, "i"),
+    "minStepMinutes", "minStepMinutesExclusive", "minutes", MAX_STEP_MINUTES)) return invalid();
+  if (!bound(new RegExp(String.raw`(${LOWER})\s*(${NUMBER})${PERCENT}`, "iu"),
+    "minProgressPct", "minProgressExclusive", "progress", 100,
+    new RegExp(String.raw`(${NUMBER})${PERCENT}\s+or\s+(?:more|higher|above)\b`, "iu"))) return invalid();
+  if (!bound(new RegExp(String.raw`(${UPPER})\s*(${NUMBER})${PERCENT}`, "iu"),
+    "maxProgressPct", "maxProgressExclusive", "progress", 100,
+    new RegExp(String.raw`(${NUMBER})${PERCENT}\s+or\s+(?:less|lower|below)\b`, "iu"))) return invalid();
+  if (!bound(new RegExp(String.raw`(?:\b(?:cost(?:ing)?|spent|spend|bill(?:ed)?)\s+(${LOWER})\s*\$?\s*(${NUMBER})|(${LOWER})\s*\$\s*(${NUMBER}))(?![\p{L}\p{N}]|[.,]\d)`, "iu"),
+    "minSpend", "minSpendExclusive", "spend", Number.MAX_SAFE_INTEGER)) return invalid();
 
-  const states: EnvState[] = [];
-  for (const [re, st] of STATE_WORDS) {
-    const m = rest.match(re);
-    if (m) {
-      states.push(st);
-      matched++;
-      categories.add("state");
-      claim(m);
-    }
-  }
-  if (states.length > 0) filter.states = [...new Set(states)];
-
-  const stuckM = rest.match(/\bstuck\b|\bblocked\b|\bnot moving\b|\bno progress\b/i);
-  if (stuckM) {
-    filter.stuck = true;
-    matched++;
-    categories.add("stuck");
-    claim(stuckM);
-  }
-
-  const stepMatch = rest.match(/step\s*(\d{1,2})/i);
-  if (stepMatch) {
-    filter.step = Math.max(0, Math.min(12, parseInt(stepMatch[1], 10)));
-    matched++;
-    categories.add("step");
-    claim(stepMatch);
-  }
-
-  const overMin = rest.match(/(over|more than|older than|at least|>=?|than)\s*(\d{1,3})\s*(?:min|mins|minutes?)\b/i);
-  if (overMin) {
-    filter.minStepMinutes = parseInt(overMin[2], 10);
-    filter.minStepMinutesExclusive = !/at least|>=/i.test(overMin[1]);
-    matched++;
-    categories.add("minutes");
-    claim(overMin);
-  }
-
-  const overPct = rest.match(/(over|more than|above|at least|>=?)\s*(\d{1,3})\s*(?:%|percent)\s*(?:done|complete|completed|of progress)?/i);
-  if (overPct) {
-    filter.minProgressPct = Math.min(100, parseInt(overPct[2], 10));
-    filter.minProgressExclusive = !/at least|>=/i.test(overPct[1]);
-    matched++;
-    categories.add("progress");
-    claim(overPct);
-  }
-  const underPct = rest.match(/(under|less than|below|at most|<=?)\s*(\d{1,3})\s*(?:%|percent)/i);
-  if (underPct) {
-    filter.maxProgressPct = Math.min(100, parseInt(underPct[2], 10));
-    filter.maxProgressExclusive = !/at most|<=/i.test(underPct[1]);
-    matched++;
-    categories.add("progress");
-    claim(underPct);
-  }
-
-  const spendMatch =
-    rest.match(/(cost(?:ing)?|spent|spend|bill(?:ed)?)\s*(over|more than|above|at least|>=?)\s*\$?\s*(\d+(?:\.\d+)?)/i) ||
-    rest.match(/(over|above|more than|>=?)\s*\$\s*(\d+(?:\.\d+)?)/i);
-  if (spendMatch) {
-    const amount = spendMatch[3] ?? spendMatch[2];
-    const op = spendMatch[3] ? spendMatch[2] : spendMatch[1];
-    filter.minSpend = parseFloat(amount);
-    filter.minSpendExclusive = !/at least|>=/i.test(op);
-    matched++;
-    categories.add("spend");
-    claim(spendMatch);
-  }
-
-  // Superlative spend questions need no threshold: sort, don't filter.
-  const spendTop =
-    !spendMatch &&
-    /\bmost\s+expensive\b|\b(?:cost|spend|bill)(?:ing|s|ed)?\s+the\s+(?:most|highest)\b|\b(?:highest|biggest|top|largest)\s+(?:spend|spenders?|costs?|bills?)\b|\bspend(?:er|ing)?s?\s+(?:the\s+)?most\b/i.test(
-      text,
-    );
-  if (spendTop) {
-    const m = rest.match(/\bmost\s+expensive\b|\b(?:cost|spend|bill)(?:ing|s|ed)?\s+the\s+(?:most|highest)\b|\b(?:highest|biggest|top|largest)\s+(?:spend|spenders?|costs?|bills?)\b|\bspend(?:er|ing)?s?\s+(?:the\s+)?most\b/i);
-    if (m) claim(m);
+  const sort = rest.match(SPEND_SORT);
+  if (sort) {
     filter.sort = "spend";
     filter.order = "desc";
-    matched++;
     categories.add("spend");
+    claim(sort);
   }
-
-  // A name search can stand alone or combine with other clauses
-  // ("failed learner named Priya"). An unparseable name after "named" is an
-  // abstain, not a silently dropped clause.
-  const nameMatch = rest.match(/(?:named|name is|learner|student)\s+([a-z][a-z .'-]{1,40})/i);
-  if (nameMatch) {
-    const candidate = nameMatch[1].trim().replace(/^named\s+/i, "");
-    const words = candidate.split(/\s+/);
-    const stop = new Set(["who", "that", "the", "with", "and", "or", "over", "under", "more", "less", "than", "made", "have", "has", "are", "is"]);
-    const looksLikeName = words.length <= 3 && words.length > 0 && !words.some((w) => stop.has(w.toLowerCase()));
-    if (looksLikeName) {
+  if (!filter.q) {
+    const name = rest.match(/\b(?:learner|student)\s+([\p{L}][\p{L} ’'-]{1,59})$/iu);
+    const candidate = name?.[1].trim();
+    const words = candidate?.split(/\s+/);
+    if (name && candidate && words && words.length <= 3 && !words.some((w) => FILLER.has(w.toLowerCase()) || NAME_END.test(w))) {
       filter.q = candidate;
-      matched++;
       categories.add("name");
-      claim(nameMatch);
-    } else if (/named|name is/i.test(nameMatch[0])) {
-      return abstain(
-        `I could not read a learner name in that request. Try "learner Priya" on its own, or use the search box.`,
-      );
+      claim(name);
     }
   }
 
-  if (/\s+or\s+/i.test(text) && categories.size > 1) {
-    return abstain(
-      'I can only combine conditions with AND, not "or". Run them one at a time, e.g. "failed" then "stuck", or try separate searches.',
-      true,
-    );
+  if (contradictoryProgress(filter)) return refuse("The progress bounds do not overlap. Change one of the thresholds.", true);
+  if (/\bactive\b/i.test(rest)) return refuse('Choose a specific state, such as "in use" or "ready", for an active PC.', true);
+  if (/\bor\b/i.test(rest)) {
+    const mutableClause = categories.size !== 1 || !categories.has("state") || states.length < 2;
+    if (mutableClause) return refuse('I can only combine conditions with AND. Run them one at a time, or use "or" between alternative states.', true);
+    rest = rest.replace(/\bor\b/gi, " ");
+  }
+  if (/[\p{N}$%<>≤≥=+]|\b(?:over|under|above|below|at least|at most|older than|more than|less than|on step|named|name is|called|zero|one|two|three|four|five|six|seven|eight|nine|ten|twice|thrice|hundred)\b/iu.test(rest) || /\b(?:and|or)\s*[.!?]*$/i.test(text)) return invalid();
+
+  const leftover = (rest.match(/[\p{L}’'-]+/gu) ?? []).filter((word) => !FILLER.has(word.toLowerCase()));
+  if (leftover.length && states.length > 1) return invalid();
+  if (!categories.size) {
+    return refuse('Could not compile that into a filter. Try "failed", "stuck on step 4 over 20 min", or "costing over $8".');
+  }
+  if (leftover.length) {
+    return refuse(`I understood part of that but not "${leftover.slice(0, 3).join(" ")}". You can use the manual filters below.`);
   }
 
-  if (matched === 0) {
-    return abstain(
-      'Could not compile that into a filter. Try "failed", "stuck on step 4 over 20 min", "over 50% done", or "costing over $8".',
-    );
-  }
-
-  // Coverage: every remaining meaningful word must be sentence filler. An
-  // unrecognized word means part of the request would be silently ignored,
-  // which is worse than saying so.
-  const leftover = rest
-    .replace(/[^a-z0-9\s$%-]/gi, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 0 && !FILLER.has(w.toLowerCase()) && !/^\d+$/.test(w) && w !== "$" && w !== "%");
-  if (leftover.length > 0) {
-    return abstain(
-      `I understood part of that but not "${leftover.slice(0, 3).join(" ")}". I can filter by state, stuck, step, time on step, progress %, spend, or a learner name.`,
-    );
-  }
-
-  if (!filter.sort) filter.sort = "risk";
   return {
-    ok: true,
-    filter,
-    description: describeFilter(filter),
-    confidence: 0.9,
-    source: "local-parser",
-    degraded: false,
+    result: { ok: true, filter: { sort: "risk", ...filter }, description: describeFilter(filter), confidence: 0.9, source: "local-parser", degraded: false },
+    explicit: filter,
   };
 }

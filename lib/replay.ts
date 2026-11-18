@@ -134,6 +134,7 @@ export function computeState(
 ): Environment[] {
   const byId = new Map<string, ReprovisionEvent[]>();
   for (const ev of log) {
+    if (ev.at > now) continue;
     const list = byId.get(ev.id) ?? [];
     list.push(ev);
     byId.set(ev.id, list);

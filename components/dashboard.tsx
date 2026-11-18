@@ -34,6 +34,7 @@ type View = "floor" | "table";
 
 const POLL_MS = 4000;
 const HISTORY = 45;
+const DEMO_SESSION_KEY = "cloudlabs-demo-session";
 const EMPTY_ADV = { stuck: false, step: "", minStepMinutes: "", minProgressPct: "", maxProgressPct: "", minSpend: "" };
 
 export default function Dashboard() {
@@ -47,6 +48,11 @@ export default function Dashboard() {
   const [lastOkAt, setLastOkAt] = useState<number | null>(null);
   const [history, setHistory] = useState<{ t: number; spend: number; attention: number }[]>([]);
   const [, setTick] = useState(0);
+  const [sessionId, setSessionId] = useState<string | null>();
+  const [sessionPending, setSessionPending] = useState(false);
+  const [sessionError, setSessionError] = useState<string | null>(null);
+  const activeSession = useRef<string | null | undefined>(undefined);
+  const sessionGeneration = useRef(0);
 
   const [view, setView] = useState<View>("floor");
   const [mode, setMode] = useState<ColorMode>("status");
@@ -60,6 +66,7 @@ export default function Dashboard() {
   const [nlError, setNlError] = useState<string | null>(null);
   const [nlBusy, setNlBusy] = useState(false);
   const [nlSuggestion, setNlSuggestion] = useState<{ text: string; description: string[]; filter: Record<string, unknown> } | null>(null);
+  const nlRequest = useRef<AbortController | null>(null);
 
   // Advanced manual controls: the same predicates the NL filter compiles to,
   // so no filtering capability depends on the natural-language feature.
@@ -76,6 +83,14 @@ export default function Dashboard() {
   useEffect(() => {
     const v = new URLSearchParams(window.location.search).get("view");
     if (v === "table" || v === "floor") setView(v);
+    let restoredSession = null;
+    try {
+      restoredSession = sessionStorage.getItem(DEMO_SESSION_KEY);
+    } catch {
+      // Session selection remains available if browser storage is disabled.
+    }
+    activeSession.current = restoredSession;
+    setSessionId(restoredSession);
     const attr = document.documentElement.dataset.theme;
     setTheme(attr === "dark" || attr === "light" ? attr : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const t = window.setInterval(() => setTick((n) => n + 1), 1000);
@@ -123,7 +138,8 @@ export default function Dashboard() {
     const q = (typed && (idOfSeat(typed) ?? typed)) || (typeof f.q === "string" ? f.q : "");
     if (q) p.set("q", q);
     p.set("sort", sortBy);
-    if (sortBy === "spend" || sortBy === "stepMinutes" || sortBy === "progress") p.set("order", "desc");
+    if (f.sort === sortBy && (f.order === "asc" || f.order === "desc")) p.set("order", f.order);
+    else if (sortBy === "spend" || sortBy === "stepMinutes" || sortBy === "progress") p.set("order", "desc");
     return p;
   }, [stateFilter, search, sortBy, nlApplied, adv]);
 
@@ -133,12 +149,20 @@ export default function Dashboard() {
   // overwrite fresher rows.
   const pollSeq = useRef(0);
   const poll = useCallback(async () => {
+    if (sessionId === undefined || sessionId !== activeSession.current) return;
     const seq = ++pollSeq.current;
+    let errorMessage = "Live data unavailable.";
     try {
-      // Rows, the whole room and the summary come from one snapshot, so
-      // every panel always agrees.
-      const eRes = await fetch(`/api/environments?${params.toString()}&include=all`, { cache: "no-store" });
-      if (!eRes.ok) throw new Error(`server ${eRes.status}`);
+      const eRes = await fetch(`/api/environments?${params.toString()}&include=all`, {
+        cache: "no-store",
+        headers: sessionId ? { "x-demo-session": sessionId } : undefined,
+      });
+      if (!eRes.ok) {
+        errorMessage = sessionId && (eRes.status === 404 || eRes.status === 410)
+          ? "This isolated demo is no longer available. Start a new demo or return to the shared session."
+          : `Live data unavailable (${eRes.status === 503 ? "storage unavailable" : `server ${eRes.status}`}).`;
+        throw new Error(errorMessage);
+      }
       const e = await eRes.json();
       if (seq !== pollSeq.current) return;
       const s = e.summary as Summary;
@@ -168,12 +192,12 @@ export default function Dashboard() {
       setFetchError(null);
       setLastOkAt(Date.now());
       setLoading(false);
-    } catch (err) {
+    } catch {
       if (seq !== pollSeq.current) return;
-      setFetchError(err instanceof Error ? err.message : "network error");
+      setFetchError(errorMessage);
       setLoading(false);
     }
-  }, [params]);
+  }, [params, sessionId]);
 
   useEffect(() => {
     poll();
@@ -182,36 +206,106 @@ export default function Dashboard() {
   }, [poll]);
 
   const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null);
+  const selectSession = (id: string | null) => {
+    ++pollSeq.current;
+    ++sessionGeneration.current;
+    activeSession.current = id;
+    try {
+      if (id) sessionStorage.setItem(DEMO_SESSION_KEY, id);
+      else sessionStorage.removeItem(DEMO_SESSION_KEY);
+    } catch {
+      // The new selection still applies for this visit.
+    }
+    prevStates.current.clear();
+    setSessionId(id);
+    setSessionError(null);
+    setSummary(null);
+    setRows([]);
+    setEveryone([]);
+    setFilteredCount(0);
+    setTransitions([]);
+    setHistory([]);
+    setLastOkAt(null);
+    setLoading(true);
+    setFetchError(null);
+    setSelectedId(null);
+    setFlash(new Set());
+    setPending(new Set());
+    setActionError(null);
+  };
+
+  const startDemo = async () => {
+    setSessionPending(true);
+    setSessionError(null);
+    try {
+      const res = await fetch("/api/session", { method: "POST" });
+      if (!res.ok) throw new Error(`server ${res.status}`);
+      const { id } = await res.json();
+      if (typeof id !== "string" || !id) throw new Error("missing demo session id");
+      selectSession(id);
+    } catch {
+      setSessionError("Could not start an isolated demo. Try again in a moment.");
+    } finally {
+      setSessionPending(false);
+    }
+  };
+
   const reprovision = useCallback(
     async (id: string) => {
+      const generation = sessionGeneration.current;
       setPending((p) => new Set(p).add(id));
       setActionError(null);
       try {
-        const res = await fetch(`/api/environments/${id}/reprovision`, { method: "POST" });
-        if (!res.ok) throw new Error(`server ${res.status}`);
-        await poll();
-      } catch {
-        setActionError({ id, message: `Reprovision of ${id} (seat ${seatOf(id)}) failed.` });
-      } finally {
-        setPending((p) => {
-          const n = new Set(p);
-          n.delete(id);
-          return n;
+        const res = await fetch(`/api/environments/${id}/reprovision`, {
+          method: "POST",
+          headers: sessionId ? { "x-demo-session": sessionId } : undefined,
         });
+        if (!res.ok) throw new Error(`server ${res.status}`);
+        if (generation === sessionGeneration.current) await poll();
+      } catch {
+        if (generation === sessionGeneration.current) {
+          setActionError({ id, message: `Reprovision of ${id} (seat ${seatOf(id)}) failed.` });
+        }
+      } finally {
+        if (generation === sessionGeneration.current) {
+          setPending((p) => {
+            const n = new Set(p);
+            n.delete(id);
+            return n;
+          });
+        }
       }
     },
-    [poll],
+    [poll, sessionId],
   );
+
+  useEffect(() => () => nlRequest.current?.abort(), []);
+
+  const cancelNL = useCallback(() => {
+    nlRequest.current?.abort();
+    nlRequest.current = null;
+    setNlBusy(false);
+    setNlSuggestion(null);
+    setNlError(null);
+  }, []);
 
   const applyNL = useCallback(async () => {
     const text = nlText.trim();
     if (!text) return;
+    cancelNL();
+    const request = new AbortController();
+    nlRequest.current = request;
     setNlBusy(true);
-    setNlError(null);
     try {
-      const res = await fetch("/api/nl-filter", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ text }) });
+      const res = await fetch("/api/nl-filter", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text }),
+        signal: request.signal,
+      });
       if (!res.ok) throw new Error(`server ${res.status}`);
       const data = await res.json();
+      if (request.signal.aborted) return;
       if (!data.ok) {
         setNlError(data.message ?? "Could not understand that filter.");
       } else {
@@ -226,17 +320,20 @@ export default function Dashboard() {
         }
       }
     } catch {
-      setNlError("Natural-language filter unavailable right now. Manual filters below still work.");
+      if (!request.signal.aborted) setNlError("Natural-language filter unavailable right now. Manual filters below still work.");
     } finally {
-      setNlBusy(false);
+      if (!request.signal.aborted) {
+        nlRequest.current = null;
+        setNlBusy(false);
+      }
     }
-  }, [nlText]);
+  }, [cancelNL, nlText]);
 
   const clearNL = useCallback(() => {
+    cancelNL();
     setNlApplied(null);
-    setNlSuggestion(null);
-    setNlError(null);
-  }, []);
+    setNlText("");
+  }, [cancelNL]);
   const clearAll = () => {
     setStateFilter([]);
     setSearch("");
@@ -326,10 +423,19 @@ export default function Dashboard() {
       </header>
 
       <main className="mx-auto max-w-[1480px] px-4 pb-12 pt-6 sm:px-6">
-        <div className="mb-5">
-          <div className="text-[12.5px] text-muted">Live workshop</div>
-          <div className="mt-0.5 text-[20px] font-semibold tracking-[-0.015em] text-ink">{summary?.sessionName ?? "Loading session…"}</div>
+        <div className="mb-5 flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <div className="text-[12.5px] text-muted">{sessionId ? "Isolated demo · Simulated data" : "Simulated workshop"}</div>
+            <div className="mt-0.5 text-[20px] font-semibold tracking-[-0.015em] text-ink">{summary?.sessionName ?? (fetchError ? "Workshop dashboard" : "Loading session…")}</div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {sessionId && <button onClick={() => selectSession(null)} disabled={sessionPending} className="btn btn-sm">Return to shared</button>}
+            <button onClick={startDemo} disabled={sessionId === undefined || sessionPending} className="btn btn-sm">
+              {sessionPending ? "Starting demo…" : sessionId ? "Start new demo" : "Start isolated demo"}
+            </button>
+          </div>
         </div>
+        {sessionError && <p role="alert" className="note-warn mb-3">{sessionError}</p>}
 
         {/* Stats */}
         <div className="command-band panel stats">
@@ -387,16 +493,19 @@ export default function Dashboard() {
             <input
               ref={nlRef}
               value={nlText}
-              onChange={(e) => setNlText(e.target.value)}
+              onChange={(e) => {
+                cancelNL();
+                setNlText(e.target.value);
+              }}
               onKeyDown={(e) => e.key === "Enter" && applyNL()}
               placeholder='Filter in plain English, e.g. "stuck on step 4 over 20 min"'
               aria-label="Natural language filter"
               className="control h-9 w-full pr-24"
             />
             <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
-              {nlApplied && (
+              {(nlApplied || nlBusy) && (
                 <button onClick={clearNL} className="btn btn-sm border-transparent">
-                  Clear filter
+                  {nlApplied ? "Clear filter" : "Cancel"}
                 </button>
               )}
               <button onClick={applyNL} disabled={nlBusy || !nlText.trim()} className="btn btn-sm btn-primary">
@@ -431,6 +540,7 @@ export default function Dashboard() {
                   if (typeof nlSuggestion.filter.sort === "string") setSortBy(nlSuggestion.filter.sort);
                   setNlText("");
                 }}
+                aria-label="Apply suggested filter"
                 className="btn btn-sm btn-primary"
               >
                 Apply
@@ -535,7 +645,7 @@ export default function Dashboard() {
         )}
         {fetchError && (
           <div role="alert" className="banner-error mt-3">
-            <span>Live data unavailable ({fetchError}). Showing last good snapshot.</span>
+            <span>{fetchError}{lastOkAt ? " Showing last good snapshot." : ""}</span>
             <button onClick={poll} className="btn btn-sm btn-danger">
               Retry now
             </button>
@@ -567,7 +677,7 @@ export default function Dashboard() {
                   statusFilter={statusFilter}
                   onToggleStatus={toggleStatus}
                 />
-                {!loading && hasFilter && rows.length === 0 && (
+                {!loading && !fetchError && hasFilter && rows.length === 0 && (
                   <div className="panel flex flex-wrap items-center justify-center gap-3 px-4 py-4 text-[13px] text-ink-2">
                     No environments match these filters.
                     <button onClick={clearAll} className="btn btn-sm">
@@ -617,7 +727,7 @@ export default function Dashboard() {
                         </td>
                       </tr>
                     ))}
-                  {!loading && rows.length === 0 && (
+                  {!loading && !fetchError && rows.length === 0 && (
                     <tr>
                       <td colSpan={6} className="py-10 text-center text-[13px] text-ink-2">
                         No environments match these filters.
