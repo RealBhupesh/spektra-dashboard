@@ -1,185 +1,20 @@
 "use client";
 
-import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { LAB_STEPS } from "@/lib/seed";
-import { type EnvRow, type SeatStatus, SEATS_PER_ROW, STATE_META, StatusChip, fmtMin, fmtUsd, seatIndex, seatOf, seatStatus } from "./ui";
-
+import { useEffect, useRef, useState } from "react";
+import * as THREE from "three";
+import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import {
+  type EnvRow,
+  type SeatStatus,
+  STATE_META,
+  seatIndex,
+  seatOf,
+  seatStatus,
+  fmtUsd,
+} from "./ui";
 export type ColorMode = "status" | "spend" | "progress";
-
-const LEGEND_ORDER: SeatStatus[] = ["in_use", "stuck", "failed", "ready", "provisioning", "deprovisioned"];
-const rampFill = (pct: number) => `color-mix(in srgb, var(--seat-ramp-end) ${pct}%, var(--seat-ramp-start))`;
-
-// Isometric lab. Seat (col c, row r) lands on a diamond lattice: columns run
-// down-right, rows run down-left. Row A is the back bench. The lattice keeps
-// every monitor clear of its neighbours, so all 120 PCs stay readable at once.
-const W = 40;
-const H = 23;
-const COLS = SEATS_PER_ROW;
-const RF = 1.3; // bench pitch: leaves room for chairs between benches
-const OX = 0;
-const OY = 0;
-const P = (c: number, r: number): [number, number] => [OX + (c - r) * W, OY + (c + r) * H];
-const pts = (a: [number, number][]) => a.map((p) => p.join(",")).join(" ");
-
-// Flat screen coordinates (24 x 16) are skewed onto the iso plane with
-// matrix(1, .5, 0, 1): x' = x, y' = y + x / 2.
-const SW = 25;
-const SH = 15.6;
-
-function Face({ st, mode, pct, ramp }: { st: SeatStatus; mode: ColorMode; pct: number; ramp?: string }) {
-  const status = mode === "status";
-  let fill = "var(--surface)";
-  let stroke = "none";
-  let dash: string | undefined;
-  if (!status) fill = ramp ?? "var(--surface)";
-  else if (st === "failed") fill = "var(--failed)";
-  else if (st === "stuck") fill = "var(--stuck)";
-  else if (st === "deprovisioned") fill = "var(--off)";
-  else if (st === "in_use") fill = "url(#hatch)";
-  else if (st === "ready") stroke = "var(--ready)";
-  else if (st === "provisioning") {
-    stroke = "var(--booting)";
-    dash = "3 2";
-  }
-  const mark = status ? "var(--seat-failure-text)" : "var(--ink)";
-  return (
-    <g>
-      <rect width={SW} height={SH} fill="var(--surface)" />
-      <rect width={SW} height={SH} fill={fill} stroke={stroke} strokeWidth={stroke === "none" ? 0 : 2.4} strokeDasharray={dash} />
-      {st === "failed" && <path d="M8 4 L16 12 M16 4 L8 12" stroke={mark} strokeWidth="2.2" fill="none" strokeLinecap="square" />}
-      {st === "stuck" && (
-        <g stroke={status ? "#1d1300" : "var(--ink)"} strokeWidth="2.4" fill="none">
-          <path d="M12 3.5 V9.5" />
-          <path d="M12 12 V12.6" />
-        </g>
-      )}
-      {st === "deprovisioned" && <path d="M7.5 8.5 L10.8 11.5 L16.5 4.8" stroke="var(--ink-2)" strokeWidth="2" fill="none" />}
-      {status && st === "in_use" && <rect x="0" y={SH - 3.4} width={(SW * pct) / 100} height="3.4" fill="var(--ink)" />}
-    </g>
-  );
-}
-
-const SC = 1.12;
-const quad = (cx: number, cy: number, a: [number, number], b: [number, number]): [number, number][] => [
-  [cx + a[0] + b[0], cy + a[1] + b[1]],
-  [cx - a[0] + b[0], cy - a[1] + b[1]],
-  [cx - a[0] - b[0], cy - a[1] - b[1]],
-  [cx + a[0] - b[0], cy + a[1] - b[1]],
-];
-// rr is the bench's real row coordinate (row index x RF).
-// Keyboard: a plate with a thin front edge, four staggered key rows and a
-// space bar. u runs along the long axis, t across it.
-function Keyboard({ kx, ky }: { kx: number; ky: number }) {
-  const kA: [number, number] = [(W / 4.4) * 1.28, (H / 4.4) * 1.28];
-  const kB: [number, number] = [(-W / 4.4 / 1.5) * 0.78, (H / 4.4 / 1.5) * 0.78];
-  const plate = quad(kx, ky, kA, kB);
-  const at = (u: number, t: number): [number, number] => [kx + kA[0] * u + kB[0] * t, ky + kA[1] * u + kB[1] * t];
-  const ts = [-0.8, -0.4, 0, 0.4, 0.8];
-  let d = "";
-  for (const t of ts) d += `M${at(-0.88, t).join(" ")} L${at(0.88, t).join(" ")} `;
-  for (let i = 0; i < 4; i++) {
-    const mid = (ts[i] + ts[i + 1]) / 2;
-    const half = 0.17;
-    const stagger = [0, 0.05, 0.09, 0][i];
-    const cols = i === 3 ? [-0.52, 0.34] : Array.from({ length: 11 }, (_, j) => -0.88 + stagger + (j * 1.76) / 11 + 0.08);
-    for (const u of cols) d += `M${at(u, mid - half).join(" ")} L${at(u, mid + half).join(" ")} `;
-  }
-  const lip = [plate[0], plate[1], [plate[1][0], plate[1][1] + 1.8], [plate[0][0], plate[0][1] + 1.8]] as [number, number][];
-  return (
-    <g>
-      <polygon className="pc-line" points={pts(lip)} fill="var(--surface-3)" />
-      <polygon className="pc-line" points={pts(plate)} fill="var(--surface)" />
-      <path className="pc-key" d={d} fill="none" />
-    </g>
-  );
-}
-
-// Slim tower with a front panel: drive slots and a power button.
-function Tower({ x, y }: { x: number; y: number }) {
-  const ex: [number, number] = [0.87 * 7.5, 0.5 * 7.5];
-  const ey: [number, number] = [-0.87 * 5.5, 0.5 * 5.5];
-  const h = 16;
-  const T0: [number, number] = [x, y];
-  const P1: [number, number] = [x + ex[0], y + ex[1]];
-  const P2: [number, number] = [x + ex[0] + ey[0], y + ex[1] + ey[1]];
-  const P3: [number, number] = [x + ey[0], y + ey[1]];
-  const up = (q: [number, number], k = h): [number, number] => [q[0], q[1] - k];
-  const fp = (u: number, v: number): [number, number] => [P3[0] + (P2[0] - P3[0]) * u, P3[1] + (P2[1] - P3[1]) * u - v];
-  return (
-    <g>
-      <polygon className="pc-line" points={pts([P3, P2, up(P2), up(P3)])} fill="var(--surface)" />
-      <polygon className="pc-line" points={pts([P2, P1, up(P1), up(P2)])} fill="var(--surface-3)" />
-      <polygon className="pc-line" points={pts([up(T0), up(P1), up(P2), up(P3)])} fill="var(--surface)" />
-      <path className="pc-key" d={`M${fp(0.16, 11.5).join(" ")} L${fp(0.84, 11.5).join(" ")} M${fp(0.16, 9.2).join(" ")} L${fp(0.84, 9.2).join(" ")}`} fill="none" />
-      <circle cx={fp(0.3, 4)[0]} cy={fp(0.3, 4)[1]} r="1" fill="none" stroke="var(--ink)" strokeWidth="0.8" />
-    </g>
-  );
-}
-
-// rr is the bench's real row coordinate (row index x RF).
-function Pc({ c, rr, st, mode, pct, ramp }: { c: number; rr: number; st: SeatStatus; mode: ColorMode; pct: number; ramp?: string }) {
-  const [bx, by] = P(c, rr - 0.14);
-  const [kx, ky] = P(c, rr + 0.2);
-  const [tx, ty] = P(c + 0.42, rr - 0.3);
-  const fw = SW * SC;
-  const fh = SH * SC;
-  const ox = bx - fw / 2;
-  const oy = by - 9 - fh - fw / 4 - 2;
-  const A: [number, number] = [W / 4.4, H / 4.4];
-  const B: [number, number] = [-W / 4.4 / 1.5, H / 4.4 / 1.5];
-  const foot = quad(bx, by, [A[0] * 1.1, A[1] * 1.1], [B[0] * 0.75, B[1] * 0.75]);
-  const mouse = quad(kx + A[0] * 1.2 * 1.62, ky + A[1] * 1.2 * 1.62, [2.6, 1.5], [-1.6, 0.9]);
-  return (
-    <g>
-      <polygon points={pts([[bx - fw / 2 - 5, oy - 5], [bx + fw / 2 + 5, oy + fw / 2 - 5], [bx + fw / 2 + 5, by + 9], [kx - 14, ky + 8], [bx - fw / 2 - 5, oy + fh + 5]])} fill="transparent" />
-      <path className="pc-cable" d={`M${bx + 3} ${by - 1} Q${bx + 10} ${by + 5} ${tx + 2} ${ty + 4}`} fill="none" />
-      <Keyboard kx={kx} ky={ky} />
-      <polygon className="pc-line pc-thin" points={pts(mouse)} fill="var(--surface)" />
-      <polygon className="pc-line" points={pts(foot)} fill="var(--surface)" />
-      <path className="pc-line" d={`M${bx - 3} ${by - 9} L${bx - 3.6} ${by - 0.6} M${bx + 3} ${by - 9} L${bx + 3.6} ${by - 0.6}`} fill="none" />
-      <g transform={`translate(${ox} ${oy}) matrix(${SC} ${SC / 2} 0 ${SC} 0 0)`}>
-        <rect className="pc-bezel" x="-2.6" y="-2.6" width={SW + 5.2} height={SH + 6.4} rx="1.2" fill="var(--surface)" />
-        <Face st={st} mode={mode} pct={pct} ramp={ramp} />
-        <circle cx={SW - 1.5} cy={SH + 2.1} r="0.75" fill="var(--ink)" />
-      </g>
-    </g>
-  );
-}
-
-// Flat swatch for the legend: the same face the PC shows, so the key and the
-// room can never disagree.
-function LegendSwatch({ s }: { s: SeatStatus }) {
-  return (
-    <svg aria-hidden width="26" height="18" viewBox="-3 -3 30 22" className="shrink-0">
-      <defs>
-        <pattern id={`lg-${s}`} width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-          <rect width="5" height="5" fill="var(--surface)" />
-          <rect width="1.4" height="5" fill="var(--line-strong)" />
-        </pattern>
-      </defs>
-      <rect x="-2" y="-2" width={SW + 4} height={SH + 4} fill="var(--surface)" stroke="var(--ink)" strokeWidth="1.2" />
-      <g>
-        <Face st={s} mode="status" pct={60} />
-      </g>
-    </svg>
-  );
-}
-
-export function FloorMap({
-  everyone,
-  matched,
-  mode,
-  onModeChange,
-  selectedId,
-  onSelect,
-  loading,
-  flash,
-  statusFilter,
-  onToggleStatus,
-  onOpenTable,
-  stale,
-  lastOkAt,
-}: {
+interface Props {
   everyone: EnvRow[];
   matched: Set<string> | null;
   mode: ColorMode;
@@ -193,452 +28,817 @@ export function FloorMap({
   onOpenTable?: () => void;
   stale?: boolean;
   lastOkAt?: number | null;
-}) {
-  const seats = useMemo(() => everyone.slice().sort((a, b) => seatIndex(a.id) - seatIndex(b.id)), [everyone]);
-  const maxSpend = useMemo(() => Math.max(0.01, ...seats.map((s) => s.spendUsd)), [seats]);
-  const counts = useMemo(() => {
-    const c: Record<SeatStatus, number> = { failed: 0, stuck: 0, in_use: 0, provisioning: 0, ready: 0, deprovisioned: 0 };
-    for (const s of seats) c[seatStatus(s)]++;
-    return c;
-  }, [seats]);
+}
+const colors: Record<SeatStatus, string> = {
+  failed: "#ee7069",
+  stuck: "#e6b25d",
+  ready: "#71c4af",
+  provisioning: "#729fdf",
+  in_use: "#85b6cd",
+  deprovisioned: "#27323b",
+};
+const pos = (id: string) => {
+  const i = seatIndex(id),
+    r = Math.floor(i / 12),
+    c = i % 12;
+  return new THREE.Vector3(
+    (c - 5.5) * 2.05 + (c >= 6 ? 1.65 : -1.65),
+    0,
+    (r - 4.5) * 2.65 + (r >= 5 ? 1.9 : -1.9),
+  );
+};
 
-  const [view, setView] = useState({ k: 1, cx: 0, cy: 0, init: false });
-  const innerRef = useRef<HTMLDivElement>(null);
-  const scrollRef = useRef<HTMLDivElement>(null);
-  // On a narrow screen start in the middle of the lab, not at its blank left corner.
+export function FloorMap(props: Props) {
+  const host = useRef<HTMLDivElement>(null),
+    latest = useRef(props);
+  latest.current = props;
+  const engine = useRef<{
+    update: () => void;
+    focus: (id: string | null) => void;
+    zoom: (k: number) => void;
+    home: () => void;
+  } | null>(null);
+  const [error, setError] = useState(false),
+    [hover, setHover] = useState<string | null>(null),
+    [seatList, setSeatList] = useState(false);
+  const selected = props.everyone.find((r) => r.id === props.selectedId);
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollLeft = Math.max(0, (el.scrollWidth - el.clientWidth) / 2);
-  }, []);
-  const svgRef = useRef<SVGSVGElement>(null);
-  const [tip, setTip] = useState<{ id: string; x: number; y: number; below: boolean } | null>(null);
-  const showTip = (id: string, el: Element) => {
-    const host = innerRef.current;
-    if (!host) return;
-    const h = host.getBoundingClientRect();
-    const r = el.getBoundingClientRect();
-    const x = Math.max(116, Math.min(h.width - 116, r.left - h.left + r.width / 2));
-    const below = r.top - h.top < 180;
-    setTip({ id, x, y: below ? r.bottom - h.top + 8 : r.top - h.top - 8, below });
-  };
-
-  const rows = seats.length === 0 ? 10 : Math.ceil(seats.length / COLS);
-  const onGridKey = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === "+" || e.key === "=") {
-      e.preventDefault();
-      zoomAt(curRef.current.k * 1.5);
-      return;
-    }
-    if (e.key === "-" || e.key === "_") {
-      e.preventDefault();
-      zoomAt(curRef.current.k / 1.5);
-      return;
-    }
-    if (e.key === "0") {
-      e.preventDefault();
-      zoomAt(1);
-      return;
-    }
-    if (e.shiftKey && e.key.startsWith("Arrow") && curRef.current.k > 1) {
-      e.preventDefault();
-      const st = 80;
-      panBy(e.key === "ArrowLeft" ? st : e.key === "ArrowRight" ? -st : 0, e.key === "ArrowUp" ? st : e.key === "ArrowDown" ? -st : 0);
-      return;
-    }
-    const t = (e.target as Element).closest("[data-idx]") as HTMLElement | null;
-    const idx = Number(t?.dataset.idx);
-    if (!t || !Number.isFinite(idx)) return;
-    // Arrows follow the screen: right/left walk along the bench, down/up change bench.
-    const delta = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: COLS, ArrowUp: -COLS }[e.key];
-    if (delta === undefined) return;
-    e.preventDefault();
-    const next = Math.max(0, Math.min(seats.length - 1, idx + delta));
-    innerRef.current?.querySelector<SVGElement>(`[data-idx="${next}"]`)?.focus();
-  };
-  const activate = (e: KeyboardEvent<SVGGElement>, id: string) => {
-    if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      setTip(null);
-      onSelect(selectedId === id ? null : id);
-    }
-  };
-  const tipRow = tip ? seats.find((s) => s.id === tip.id) : null;
-  const rowsR = (rows - 1) * RF + 1.2;
-  const floor = [P(-1.1, -0.9), P(COLS + 0.1, -0.9), P(COLS + 0.1, rowsR + 1.1), P(-1.1, rowsR + 1.1)];
-  const xs = floor.map((p) => p[0]);
-  const ys = floor.map((p) => p[1]);
-  const vb = { x: Math.min(...xs) - 12, y: Math.min(...ys) - 54, w: Math.max(...xs) - Math.min(...xs) + 24, h: Math.max(...ys) - Math.min(...ys) + 80 };
-  const KMAX = 4;
-  const clampView = (k: number, cx: number, cy: number) => {
-    const kk = Math.max(1, Math.min(KMAX, k));
-    const w = vb.w / kk;
-    const h = vb.h / kk;
-    return {
-      k: kk,
-      cx: kk === 1 ? vb.x + vb.w / 2 : Math.max(vb.x + w / 2, Math.min(vb.x + vb.w - w / 2, cx)),
-      cy: kk === 1 ? vb.y + vb.h / 2 : Math.max(vb.y + h / 2, Math.min(vb.y + vb.h - h / 2, cy)),
-      init: true,
-    };
-  };
-  const cur = view.init ? clampView(view.k, view.cx, view.cy) : clampView(1, 0, 0);
-  const vw = vb.w / cur.k;
-  const vh = vb.h / cur.k;
-  const viewBox = `${cur.cx - vw / 2} ${cur.cy - vh / 2} ${vw} ${vh}`;
-  const curRef = useRef(cur);
-  curRef.current = cur;
-  const vbRef = useRef(vb);
-  vbRef.current = vb;
-  const gesture = useRef<{ pts: Map<number, { x: number; y: number }>; moved: boolean; startX: number; startY: number; pinch: number } | null>(null);
-  if (!gesture.current) gesture.current = { pts: new Map(), moved: false, startX: 0, startY: 0, pinch: 0 };
-  const apply = (fn: (c: typeof cur, v: typeof vb) => { k: number; cx: number; cy: number }) => {
-    setTip(null);
-    setView((old) => {
-      void old;
-      const n = fn(curRef.current, vbRef.current);
-      const c = curRef.current;
-      const kk = Math.max(1, Math.min(KMAX, n.k));
-      const w = vbRef.current.w / kk;
-      const h = vbRef.current.h / kk;
-      const r = {
-        k: kk,
-        cx: kk === 1 ? vbRef.current.x + vbRef.current.w / 2 : Math.max(vbRef.current.x + w / 2, Math.min(vbRef.current.x + vbRef.current.w - w / 2, n.cx)),
-        cy: kk === 1 ? vbRef.current.y + vbRef.current.h / 2 : Math.max(vbRef.current.y + h / 2, Math.min(vbRef.current.y + vbRef.current.h - h / 2, n.cy)),
-        init: true,
-      };
-      curRef.current = { ...c, ...r };
-      return r;
-    });
-  };
-  // Zoom to newK, keeping the point under (px,py) (client px) fixed.
-  const zoomAt = (newK: number, px?: number, py?: number) =>
-    apply((c, v) => {
-      const svg = svgRef.current;
-      if (!svg) return { k: newK, cx: c.cx, cy: c.cy };
-      const r = svg.getBoundingClientRect();
-      const fx = px === undefined ? 0.5 : (px - r.left) / r.width;
-      const fy = py === undefined ? 0.5 : (py - r.top) / r.height;
-      const w0 = v.w / c.k;
-      const h0 = v.h / c.k;
-      const ax = c.cx - w0 / 2 + fx * w0;
-      const ay = c.cy - h0 / 2 + fy * h0;
-      const kk = Math.max(1, Math.min(KMAX, newK));
-      return { k: kk, cx: ax - (fx - 0.5) * (v.w / kk), cy: ay - (fy - 0.5) * (v.h / kk) };
-    });
-  const panBy = (dxPx: number, dyPx: number) =>
-    apply((c, v) => {
-      const svg = svgRef.current;
-      const r = svg?.getBoundingClientRect();
-      if (!r || c.k === 1) return c;
-      return { k: c.k, cx: c.cx - (dxPx / r.width) * (v.w / c.k), cy: c.cy - (dyPx / r.height) * (v.h / c.k) };
-    });
-  // Wheel needs a non-passive listener so Ctrl+wheel can zoom without zooming the whole page.
-  // Plain wheel only pans once the lab is zoomed in, so the page still scrolls normally at Fit.
-  useEffect(() => {
-    const el = innerRef.current;
+    const el = host.current;
     if (!el) return;
-    const onWheel = (e: WheelEvent) => {
-      if (e.ctrlKey || e.metaKey) {
-        e.preventDefault();
-        zoomAt(curRef.current.k * Math.exp(-e.deltaY * 0.0025), e.clientX, e.clientY);
-      } else if (curRef.current.k > 1) {
-        e.preventDefault();
-        panBy(-e.deltaX, -e.deltaY);
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: true,
+        alpha: false,
+        powerPreference: "high-performance",
+      });
+    } catch {
+      setError(true);
+      return;
+    }
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.5;
+    renderer.domElement.setAttribute(
+      "aria-label",
+      "Interactive 3D computer lab. Use the seat browser or All learners for keyboard access.",
+    );
+    el.appendChild(renderer.domElement);
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color("#101820");
+    scene.fog = new THREE.Fog("#101820", 75, 125);
+    const camera = new THREE.PerspectiveCamera(34, 1, 0.1, 180);
+    camera.position.set(31, 40, 43);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.set(0, 0, 0);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.09;
+    controls.minDistance = 5;
+    controls.maxDistance = 150;
+    controls.maxPolarAngle = Math.PI * 0.43;
+    controls.minPolarAngle = 0.2;
+    controls.enableRotate = true;
+    controls.screenSpacePanning = true;
+    controls.mouseButtons = {
+      LEFT: THREE.MOUSE.PAN,
+      MIDDLE: THREE.MOUSE.DOLLY,
+      RIGHT: THREE.MOUSE.ROTATE,
+    };
+    // One-finger pan, two-finger pinch. Vertical page scroll remains available outside the canvas.
+    controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
+    scene.add(new THREE.HemisphereLight("#dce8ff", "#35332f", 2.4));
+    const key = new THREE.DirectionalLight("#fff4e5", 3.4);
+    key.position.set(-12, 28, 15);
+    key.castShadow = true;
+    key.shadow.mapSize.set(2048, 2048);
+    key.shadow.camera.left = -27;
+    key.shadow.camera.right = 27;
+    key.shadow.camera.top = 28;
+    key.shadow.camera.bottom = -28;
+    key.shadow.normalBias = 0.035;
+    key.shadow.bias = -0.0001;
+    scene.add(key);
+    const rim = new THREE.DirectionalLight("#a7c2ed", 1.2);
+    rim.position.set(20, 12, -20);
+    scene.add(rim);
+    const materials: THREE.Material[] = [],
+      geometries: THREE.BufferGeometry[] = [],
+      textures: THREE.Texture[] = [];
+    const mat = (color: string, metalness = 0, roughness = 0.7) => {
+      const m = new THREE.MeshStandardMaterial({ color, metalness, roughness });
+      materials.push(m);
+      return m;
+    };
+    const desk = mat("#424a52", 0.35, 0.52),
+      edge = mat("#252d35", 0.55, 0.38),
+      metal = mat("#7e8a95", 0.65, 0.35),
+      plastic = mat("#171e25", 0.2, 0.5),
+      keycap = mat("#363f48", 0.05, 0.72),
+      fabric = mat("#333e47", 0.05, 0.95),
+      floor = mat("#252e37", 0.05, 0.9),
+      aisle = mat("#19232d", 0.1, 0.9),
+      wall = mat("#303b46", 0.15, 0.75),
+      leaf = mat("#536d5b", 0, 0.9),
+      pot = mat("#8b9294", 0.1, 0.8);
+    const boxes = new Map<string, THREE.BoxGeometry>();
+    function box(
+      g: THREE.Object3D,
+      w: number,
+      h: number,
+      d: number,
+      x: number,
+      y: number,
+      z: number,
+      m: THREE.Material,
+      shadow = true,
+    ) {
+      const k = [w, h, d].join();
+      let geo = boxes.get(k);
+      if (!geo) {
+        geo =
+          Math.min(w, h, d) >= 0.035
+            ? new RoundedBoxGeometry(
+                w,
+                h,
+                d,
+                2,
+                Math.min(0.025, Math.min(w, h, d) / 3),
+              )
+            : new THREE.BoxGeometry(w, h, d);
+        boxes.set(k, geo);
+        geometries.push(geo);
+      }
+      const mesh = new THREE.Mesh(geo, m);
+      mesh.position.set(x, y, z);
+      mesh.castShadow = shadow;
+      mesh.receiveShadow = true;
+      g.add(mesh);
+      return mesh;
+    }
+    box(scene, 32, 0.22, 37, 0, -0.22, 0, floor, false);
+    box(scene, 2.8, 0.025, 36.7, 0, -0.09, 0, aisle, false);
+    box(scene, 31.7, 0.026, 3.3, 0, -0.08, 0.6, aisle, false);
+    // Low architectural walls keep the room legible without hiding any seats.
+    box(scene, 32, 1.9, 0.25, 0, 0.7, -18.3, wall);
+    box(scene, 0.25, 1.9, 36.5, -15.9, 0.7, 0, wall);
+    for (const x of [-15, 15])
+      for (const z of [-16.7, -0.6, 16.7]) {
+        box(scene, 0.6, 0.65, 0.6, x, 0.25, z, pot);
+        const plant = new THREE.Group();
+        plant.position.set(x, 0.55, z);
+        for (let n = 0; n < 6; n++) {
+          const b = box(
+            plant,
+            0.13,
+            1.1,
+            0.4,
+            Math.sin(n) * 0.19,
+            0.4,
+            Math.cos(n) * 0.19,
+            leaf,
+          );
+          b.rotation.z = Math.sin(n) * 0.35;
+          b.rotation.y = n;
+        }
+        scene.add(plant);
+      }
+    function label(text: string, x: number, z: number) {
+      const c = document.createElement("canvas");
+      c.width = 512;
+      c.height = 128;
+      const ctx = c.getContext("2d")!;
+      ctx.fillStyle = "#b7c4d0";
+      ctx.font = "500 56px system-ui";
+      ctx.textAlign = "center";
+      ctx.fillText(text, 256, 82);
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace;
+      textures.push(t);
+      const m = new THREE.MeshBasicMaterial({
+        map: t,
+        transparent: true,
+        depthWrite: false,
+      });
+      materials.push(m);
+      const geo = new THREE.PlaneGeometry(3.4, 0.85);
+      geometries.push(geo);
+      const p = new THREE.Mesh(geo, m);
+      p.rotation.x = -Math.PI / 2;
+      p.position.set(x, 0.025, z);
+      scene.add(p);
+    }
+    for (let r = 0; r < 10; r++)
+      label(
+        `BENCH ${String.fromCharCode(65 + r)}`,
+        -14.1,
+        (r - 4.5) * 2.65 + (r >= 5 ? 1.9 : -1.9),
+      );
+    label("CLOUDLABS", 0, -17.1);
+    let needsRender = true;
+    const screenTextures = new Map<SeatStatus, THREE.CanvasTexture>();
+    for (const st of Object.keys(colors) as SeatStatus[]) {
+      const c = document.createElement("canvas");
+      c.width = 384;
+      c.height = 216;
+      const q = c.getContext("2d")!;
+      q.fillStyle = st === "deprovisioned" ? "#0b1219" : "#142632";
+      q.fillRect(0, 0, 384, 216);
+      if (st !== "deprovisioned") {
+        q.fillStyle = "#223e50";
+        q.fillRect(0, 0, 384, 15);
+        q.fillRect(0, 15, 49, 189);
+        q.fillStyle = "#456073";
+        for (let n = 0; n < 7; n++) q.fillRect(9, 32 + n * 17, 28, 3);
+        q.fillStyle = "#86a8bb";
+        q.fillRect(65, 32, 118, 6);
+        q.fillStyle = "#3e5b70";
+        for (let n = 0; n < 5; n++) {
+          q.fillRect(65, 52 + n * 20, 90 + (n % 3) * 29, 4);
+          q.fillRect(65, 59 + n * 20, 60 + (n % 2) * 45, 2);
+        }
+        q.fillStyle = {
+          failed: "#6f282c",
+          stuck: "#645026",
+          ready: "#1e5148",
+          provisioning: "#294c71",
+          in_use: "#274756",
+          deprovisioned: "#0b1720",
+        }[st];
+        q.fillRect(227, 30, 142, 145);
+        q.fillStyle = colors[st];
+        q.font = "bold 48px system-ui";
+        q.textAlign = "center";
+        q.fillText(
+          st === "failed"
+            ? "!"
+            : st === "stuck"
+              ? "…"
+              : st === "provisioning"
+                ? "↻"
+                : "✓",
+          298,
+          102,
+        );
+        q.font = "13px system-ui";
+        q.fillText(STATE_META[st].label, 298, 132);
+        q.fillStyle = "#274154";
+        q.fillRect(0, 199, 384, 17);
+        q.fillStyle = "#79a2b9";
+        for (let n = 0; n < 6; n++) q.fillRect(147 + n * 17, 203, 9, 9);
+      } else {
+        q.fillStyle = "#1d2a36";
+        q.font = "16px system-ui";
+        q.textAlign = "center";
+        q.fillText("Lab complete", 192, 114);
+      }
+      const t = new THREE.CanvasTexture(c);
+      t.colorSpace = THREE.SRGBColorSpace;
+      t.anisotropy = 4;
+      textures.push(t);
+      screenTextures.set(st, t);
+    }
+    const screens = new Map<string, THREE.MeshStandardMaterial>(),
+      groups = new Map<string, THREE.Group>(),
+      hitboxes: THREE.Object3D[] = [];
+    const glowMaterial = (color: string) => {
+      const m = new THREE.MeshStandardMaterial({
+        color,
+        emissive: color,
+        emissiveIntensity: 0.2,
+        metalness: 0.3,
+        roughness: 0.2,
+      });
+      materials.push(m);
+      return m;
+    };
+    for (let i = 0; i < 120; i++) {
+      // Inverse of the existing stable seat permutation, not a new identity map.
+      const id = `env-${String(((i * 13) % 120) + 1).padStart(3, "0")}`;
+      const g = new THREE.Group();
+      g.position.copy(pos(id));
+      scene.add(g);
+      groups.set(id, g);
+      box(g, 1.82, 0.1, 1.2, 0, 1.34, 0, desk);
+      box(g, 1.84, 0.035, 1.22, 0, 1.29, 0, edge);
+      for (const x of [-0.77, 0.77])
+        for (const z of [-0.44, 0.44])
+          box(g, 0.055, 1.25, 0.055, x, 0.64, z, edge);
+      box(g, 1.45, 0.045, 0.05, 0, 0.38, -0.46, edge);
+      // Pedestal, tilted monitor, bezel and glass screen.
+      box(g, 0.38, 0.035, 0.25, -0.16, 1.42, -0.24, metal);
+      box(g, 0.055, 0.32, 0.055, -0.16, 1.57, -0.31, metal);
+      const display = new THREE.Group();
+      display.position.set(-0.16, 1.96, -0.34);
+      display.rotation.x = -0.08;
+      g.add(display);
+      box(display, 1.12, 0.68, 0.065, 0, 0, 0, plastic);
+      const sm = glowMaterial("#ffffff");
+      sm.map = screenTextures.get("deprovisioned")!;
+      sm.emissiveMap = sm.map;
+      screens.set(id, sm);
+      box(display, 1.045, 0.586, 0.012, 0, 0.012, 0.039, sm, false);
+      box(display, 0.026, 0.009, 0.013, 0.46, -0.308, 0.039, metal, false);
+      // Small desktop tower, drive slot, vent rails and a power light.
+      box(g, 0.25, 0.59, 0.47, 0.66, 1.675, -0.24, plastic);
+      box(g, 0.22, 0.55, 0.018, 0.66, 1.675, 0.003, edge);
+      box(g, 0.14, 0.018, 0.008, 0.66, 1.88, 0.018, metal, false);
+      for (let k = 0; k < 5; k++)
+        box(
+          g,
+          0.14,
+          0.012,
+          0.008,
+          0.66,
+          1.55 + k * 0.026,
+          0.018,
+          keycap,
+          false,
+        );
+      box(g, 0.025, 0.025, 0.01, 0.72, 1.82, 0.019, metal, false);
+      box(g, 0.84, 0.035, 0.29, -0.2, 1.415, 0.27, plastic);
+      // Keys merge into a quiet material at overview distance, resolve when zoomed in.
+      for (let r = 0; r < 4; r++)
+        for (let c = 0; c < 13; c++)
+          box(
+            g,
+            0.046,
+            0.018,
+            0.043,
+            -0.56 + c * 0.058,
+            1.442,
+            0.17 + r * 0.058,
+            keycap,
+            false,
+          );
+      box(g, 0.28, 0.018, 0.04, -0.2, 1.443, 0.391, keycap, false);
+      box(g, 0.32, 0.008, 0.35, 0.47, 1.405, 0.27, edge, false);
+      box(g, 0.11, 0.045, 0.17, 0.47, 1.434, 0.25, plastic, false);
+      box(g, 0.007, 0.008, 0.06, 0.47, 1.459, 0.22, metal, false);
+      // Quiet upholstered task chair, seat, back and five-spoke base.
+      box(g, 0.52, 0.1, 0.48, 0, 0.74, 1.02, fabric);
+      box(g, 0.5, 0.51, 0.075, 0, 1.0, 1.26, fabric);
+      box(g, 0.065, 0.5, 0.065, 0, 0.43, 1.02, metal);
+      for (let k = 0; k < 5; k++) {
+        const a = (k * Math.PI * 2) / 5;
+        const b = box(
+          g,
+          0.035,
+          0.035,
+          0.42,
+          Math.sin(a) * 0.18,
+          0.18,
+          1.02 + Math.cos(a) * 0.18,
+          edge,
+        );
+        b.rotation.y = a;
+      }
+      const h = box(
+        g,
+        1.83,
+        2.4,
+        1.8,
+        0,
+        1.2,
+        0.3,
+        new THREE.MeshBasicMaterial({ visible: false }),
+        false,
+      );
+      materials.push(h.material);
+      h.userData.id = id;
+      hitboxes.push(h);
+    }
+    // Batch repeated furniture and keycaps. Thousands of physical details,
+    // a small number of GPU draw calls instead of one per keyboard key.
+    scene.updateMatrixWorld(true);
+    const batches = new Map<
+      string,
+      { geo: THREE.BufferGeometry; mat: THREE.Material; meshes: THREE.Mesh[] }
+    >();
+    const screenMaterials = new Set(screens.values());
+    scene.traverse((o) => {
+      if (
+        !(o instanceof THREE.Mesh) ||
+        Array.isArray(o.material) ||
+        screenMaterials.has(o.material) ||
+        o.userData.id ||
+        o.material.transparent
+      )
+        return;
+      const k = o.geometry.uuid + o.material.uuid;
+      const b = batches.get(k) ?? {
+        geo: o.geometry,
+        mat: o.material,
+        meshes: [] as THREE.Mesh[],
+      };
+      b.meshes.push(o);
+      batches.set(k, b);
+    });
+    for (const b of batches.values()) {
+      if (b.meshes.length < 2) continue;
+      const inst = new THREE.InstancedMesh(b.geo, b.mat, b.meshes.length);
+      b.meshes.forEach((m, i) => {
+        inst.setMatrixAt(i, m.matrixWorld);
+        m.removeFromParent();
+      });
+      inst.castShadow = b.meshes[0].castShadow;
+      inst.receiveShadow = true;
+      inst.instanceMatrix.needsUpdate = true;
+      scene.add(inst);
+    }
+    // Selected workstation outline is spatial, not a full-scene halo.
+    const outlineGeo = new THREE.EdgesGeometry(
+      new THREE.BoxGeometry(1.92, 0.12, 1.3),
+    );
+    geometries.push(outlineGeo);
+    const outlineMat = new THREE.LineBasicMaterial({ color: "#bad9ed" });
+    materials.push(outlineMat);
+    const outline = new THREE.LineSegments(outlineGeo, outlineMat);
+    outline.visible = false;
+    scene.add(outline);
+    const ray = new THREE.Raycaster(),
+      pointer = new THREE.Vector2();
+    let down = { x: 0, y: 0 };
+    function pick(e: PointerEvent) {
+      const r = renderer.domElement.getBoundingClientRect();
+      pointer.set(
+        ((e.clientX - r.left) / r.width) * 2 - 1,
+        (-(e.clientY - r.top) / r.height) * 2 + 1,
+      );
+      ray.setFromCamera(pointer, camera);
+      return ray.intersectObjects(hitboxes, false)[0]?.object.userData.id as
+        string | undefined;
+    }
+    const pd = (e: PointerEvent) => {
+      down = { x: e.clientX, y: e.clientY };
+    };
+    const pu = (e: PointerEvent) => {
+      if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 7) return;
+      const id = pick(e);
+      if (id)
+        latest.current.onSelect(latest.current.selectedId === id ? null : id);
+    };
+    const pm = (e: PointerEvent) => {
+      if (e.buttons) return;
+      const id = pick(e);
+      setHover(id ?? null);
+      renderer.domElement.style.cursor = id ? "pointer" : "grab";
+    };
+    const pl = () => setHover(null);
+    renderer.domElement.addEventListener("pointerdown", pd);
+    renderer.domElement.addEventListener("pointerup", pu);
+    renderer.domElement.addEventListener("pointermove", pm);
+    renderer.domElement.addEventListener("pointerleave", pl);
+    let goalTarget: THREE.Vector3 | null = null,
+      goalCamera: THREE.Vector3 | null = null;
+    const home = () => {
+      needsRender = true;
+      goalTarget = new THREE.Vector3(0, 0, 0);
+      const aspect = el.clientWidth / el.clientHeight;
+      const distance = Math.max(57, 68 / aspect);
+      goalCamera = new THREE.Vector3(0.47, 0.61, 0.65)
+        .normalize()
+        .multiplyScalar(distance);
+    };
+    const selectedCanvas=document.createElement("canvas"); selectedCanvas.width=512;selectedCanvas.height=128;
+    const selectedTexture=new THREE.CanvasTexture(selectedCanvas); selectedTexture.colorSpace=THREE.SRGBColorSpace;textures.push(selectedTexture);
+    const selectedMat=new THREE.SpriteMaterial({map:selectedTexture,depthTest:false,transparent:true});materials.push(selectedMat);
+    const selectedTag=new THREE.Sprite(selectedMat);selectedTag.scale.set(1.9,.475,1);selectedTag.visible=false;selectedTag.renderOrder=100;scene.add(selectedTag);
+    const focus = (id: string | null) => {
+      needsRender = true;
+      if (!id) {
+        home();
+        outline.visible = false;
+        selectedTag.visible=false;
+        return;
+      }
+      const p = pos(id);
+      const q=selectedCanvas.getContext("2d")!;q.clearRect(0,0,512,128);q.fillStyle="#d7ecf5";q.fillRect(0,0,512,128);q.fillStyle="#13212c";q.font="600 44px system-ui";q.textAlign="center";q.fillText(`${seatOf(id)}  ·  SELECTED`,256,81);selectedTexture.needsUpdate=true;selectedTag.position.copy(p).add(new THREE.Vector3(0,3,0));selectedTag.visible=true;
+      outline.visible = true;
+      outline.position.copy(p).add(new THREE.Vector3(0, 1.36, 0));
+      goalTarget = p.clone().add(new THREE.Vector3(0, 1, 0));
+      goalCamera = p.clone().add(new THREE.Vector3(4.3, 5.4, 7));
+    };
+    const update = () => {
+      needsRender = true;
+      const p = latest.current,
+        max = Math.max(1, ...p.everyone.map((r) => r.spendUsd));
+      for (const r of p.everyone) {
+        const m = screens.get(r.id),
+          g = groups.get(r.id);
+        if (!m || !g) continue;
+        const c =
+          p.mode === "status"
+            ? new THREE.Color(colors[seatStatus(r)])
+            : new THREE.Color("#233744").lerp(
+                new THREE.Color("#b3d7d3"),
+                p.mode === "spend" ? r.spendUsd / max : r.progressPct / 100,
+              );
+        const tex = p.mode === "status" ? screenTextures.get(seatStatus(r))! : null;
+        if (m.map !== tex) {
+          m.map = tex;
+          m.emissiveMap = tex;
+          m.needsUpdate = true;
+        }
+        if (p.mode === "status") c.set("#ffffff");
+        if (p.matched && !p.matched.has(r.id)) c.multiplyScalar(0.15);
+        m.color.copy(c);
+        m.emissive.copy(c);
+        m.emissiveIntensity = r.state === "deprovisioned" ? 0.02 : 0.18;
       }
     };
-    el.addEventListener("wheel", onWheel, { passive: false });
-    return () => el.removeEventListener("wheel", onWheel);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    engine.current = {
+      update,
+      focus,
+      home,
+      zoom: (k) => {
+        goalTarget = null;
+        goalCamera = null;
+        needsRender = true;
+        camera.position
+          .sub(controls.target)
+          .multiplyScalar(k)
+          .add(controls.target);
+      },
+    };
+    update();
+    home();
+    let oldWidth = 0;
+    const ro = new ResizeObserver(() => {
+      const w = el.clientWidth,
+        h = el.clientHeight;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      needsRender = true;
+      if (Math.abs(w - oldWidth) > 80 && !latest.current.selectedId) home();
+      oldWidth = w;
+    });
+    ro.observe(el);
+    let frame = 0;
+    const reduced = window.matchMedia(
+      "(prefers-reduced-motion: reduce)",
+    ).matches;
+    const draw = () => {
+      frame = requestAnimationFrame(draw);
+      if (goalTarget && goalCamera) {
+        needsRender = true;
+        const t = reduced ? 1 : 0.22;
+        controls.target.lerp(goalTarget, t);
+        camera.position.lerp(goalCamera, t);
+        if (camera.position.distanceTo(goalCamera) < 0.02) {
+          goalTarget = null;
+          goalCamera = null;
+        }
+      }
+      const changed = controls.update();
+      if (needsRender || changed) {
+        renderer.render(scene, camera);
+        needsRender = false;
+      }
+    };
+    draw();
+    const interrupt = () => {
+      goalTarget = null;
+      goalCamera = null;
+    };
+    controls.addEventListener("start", interrupt);
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+      controls.dispose();
+      renderer.domElement.removeEventListener("pointerdown", pd);
+      renderer.domElement.removeEventListener("pointerup", pu);
+      renderer.domElement.removeEventListener("pointermove", pm);
+      renderer.domElement.removeEventListener("pointerleave", pl);
+      geometries.forEach((g) => g.dispose());
+      materials.forEach((m) => m.dispose());
+      textures.forEach((t) => t.dispose());
+      renderer.dispose();
+      renderer.domElement.remove();
+      engine.current = null;
+    };
   }, []);
-  const onPointerDown = (e: React.PointerEvent) => {
-    pointerDown.current = true;
-    const g = gesture.current!;
-    g.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
-    if (g.pts.size === 1) {
-      g.moved = false;
-      g.startX = e.clientX;
-      g.startY = e.clientY;
-    }
-    if (g.pts.size === 2) {
-      const [a, b] = [...g.pts.values()];
-      g.pinch = Math.hypot(a.x - b.x, a.y - b.y);
-      g.moved = true;
-    }
-  };
-  const onPointerMove = (e: React.PointerEvent) => {
-    const g = gesture.current!;
-    const prev = g.pts.get(e.pointerId);
-    if (!prev) return;
-    const now = { x: e.clientX, y: e.clientY };
-    if (g.pts.size === 2) {
-      g.pts.set(e.pointerId, now);
-      const [a, b] = [...g.pts.values()];
-      const d = Math.hypot(a.x - b.x, a.y - b.y);
-      if (g.pinch > 0 && d > 0) zoomAt(curRef.current.k * (d / g.pinch), (a.x + b.x) / 2, (a.y + b.y) / 2);
-      g.pinch = d;
-      return;
-    }
-    g.pts.set(e.pointerId, now);
-    if (curRef.current.k <= 1) return;
-    if (!g.moved && Math.hypot(now.x - g.startX, now.y - g.startY) > 5) {
-      g.moved = true;
-      try {
-        (e.currentTarget as Element).setPointerCapture(e.pointerId);
-      } catch {}
-    }
-    if (g.moved) panBy(now.x - prev.x, now.y - prev.y);
-  };
-  const onPointerEnd = (e: React.PointerEvent) => {
-    const g = gesture.current!;
-    if (g.pts.size <= 1) setTimeout(() => (pointerDown.current = false), 0);
-    g.pts.delete(e.pointerId);
-    if (g.pts.size === 0) setTimeout(() => (g.moved = false), 0);
-  };
-  const swallowClickAfterDrag = (e: React.MouseEvent) => {
-    if (gesture.current!.moved) {
-      e.stopPropagation();
-      e.preventDefault();
-    }
-  };
-  // Keyboard focus only: a pointer press must never pan the view, or the world
-  // shifts under the cursor before the click lands and the click misses the PC.
-  const pointerDown = useRef(false);
-  const revealFocused = (e: React.FocusEvent) => {
-    const t = (e.target as Element).closest?.("[data-idx]");
-    const svg = svgRef.current;
-    if (!t || !svg || curRef.current.k <= 1 || pointerDown.current) return;
-    const r = svg.getBoundingClientRect();
-    const q = t.getBoundingClientRect();
-    const m = 6; // only pan when the PC is actually (nearly) out of view
-    let dx = 0;
-    let dy = 0;
-    if (q.left < r.left + m) dx = r.left + m - q.left;
-    else if (q.right > r.right - m) dx = r.right - m - q.right;
-    if (q.top < r.top + m) dy = r.top + m - q.top;
-    else if (q.bottom > r.bottom - m) dy = r.bottom - m - q.bottom;
-    if (dx || dy) panBy(dx, dy);
-  };
-  const letters = Array.from({ length: rows }, (_, i) => String.fromCharCode(65 + i));
-
+  useEffect(() => {
+    engine.current?.update();
+  }, [props.everyone, props.matched, props.mode]);
+  useEffect(() => {
+    engine.current?.focus(props.selectedId);
+  }, [props.selectedId]);
+  const hovered = props.everyone.find((r) => r.id === hover);
+  const counts = props.everyone.reduce(
+    (a, r) => {
+      a[seatStatus(r)]++;
+      return a;
+    },
+    {
+      failed: 0,
+      stuck: 0,
+      in_use: 0,
+      ready: 0,
+      provisioning: 0,
+      deprovisioned: 0,
+    },
+  );
   return (
-    <section className="panel flex min-w-0 flex-col" aria-label="Lab floor map">
-      <div className="panel-head flex-wrap items-center">
+    <section className="spatial-room" aria-label="Lab floor map">
+      <div className="room-topline">
         <div>
-          <h2 className="panel-title">Lab floor</h2>
-          <p className="panel-meta">Each PC is one learner&apos;s. Hover for details, click to open. Ctrl + scroll or pinch to zoom, drag to pan, + / - / 0 on the keyboard.</p>
+          <span className="room-eyebrow">
+            {selected
+              ? `ENTIRE LAB / BENCH ${seatOf(selected.id)[0]} / SEAT ${seatOf(selected.id)}`
+              : "120-SEAT COMPUTER LAB"}
+          </span>
+          <h2>
+            {selected
+              ? `${seatOf(selected.id)} · ${selected.learnerName}`
+              : "A place for every learner."}
+          </h2>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-        <div className="seg" role="group" aria-label="Zoom lab">
-          <button onClick={() => zoomAt(cur.k / 1.5)} disabled={cur.k <= 1} aria-label="Zoom out" title="Zoom out (-)">
-            &minus;
-          </button>
-          <button onClick={() => zoomAt(cur.k * 1.5)} disabled={cur.k >= KMAX} aria-label="Zoom in" title="Zoom in (+)">
-            +
-          </button>
-          <button onClick={() => zoomAt(1)} aria-pressed={cur.k === 1} title="Fit the whole lab (0)">
-            Fit
-          </button>
-        </div>
-        <div className="seg" role="group" aria-label="Color seats by">
+        <div className="room-seg" role="group" aria-label="Color seats by">
           {(["status", "spend", "progress"] as const).map((m) => (
-            <button key={m} aria-pressed={mode === m} onClick={() => onModeChange(m)}>
-              {m === "status" ? "Status" : m === "spend" ? "Spend" : "Progress"}
+            <button
+              key={m}
+              aria-pressed={props.mode === m}
+              onClick={() => props.onModeChange(m)}
+            >
+              {m[0].toUpperCase() + m.slice(1)}
             </button>
           ))}
         </div>
-        </div>
       </div>
-
-      {(stale || matched !== null) && (
-        <div role="status" className="flex flex-col gap-0.5 border-t border-line px-4 py-2 text-[12.5px] text-ink-2">
-          {stale && (
-            <span data-stale-note>
-              {lastOkAt ? `Showing the last snapshot from ${new Date(lastOkAt).toLocaleTimeString()}.` : "No snapshot loaded yet."} PCs may be out of date until the connection returns.
-            </span>
-          )}
-          {matched !== null && (
-            <span data-filter-note>
-              {matched.size === 0 ? "No PCs match these filters, so all 120 are dimmed." : `${matched.size} of ${seats.length} PCs match and stay bright.`} Needs attention and the summary count all {seats.length}, not just the filtered PCs.
-            </span>
-          )}
-        </div>
+      {props.stale && (
+        <p className="room-notice" role="status">
+          Showing the last snapshot
+          {props.lastOkAt
+            ? ` from ${new Date(props.lastOkAt).toLocaleTimeString()}`
+            : ""}
+          . Reconnecting. PCs may be out of date.
+        </p>
       )}
-
-      {onOpenTable && (
-        <div className="flex items-center justify-between gap-3 border-t border-line px-4 py-2.5 text-[12.5px] text-ink-2 sm:hidden">
-          <span>The lab is drawn for wide screens. On a phone the list is easier to scan.</span>
-          <button className="btn btn-sm shrink-0" onClick={onOpenTable}>
-            Open list
-          </button>
-        </div>
+      {props.matched !== null && (
+        <p className="room-notice" data-filter-note>
+          {props.matched.size} of {props.everyone.length} PCs highlighted.
+          Summary and attention count the whole room.
+        </p>
       )}
-
-      <div ref={scrollRef} className="floor">
-        <div
-          ref={innerRef}
-          className="floor-inner"
-          data-zoom={cur.k.toFixed(2)}
-          data-zoomed={cur.k > 1}
-          onKeyDown={onGridKey}
-          onMouseLeave={() => setTip(null)}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerEnd}
-          onPointerCancel={onPointerEnd}
-          onClickCapture={swallowClickAfterDrag}
-          onFocusCapture={revealFocused}
-        >
-          <svg ref={svgRef} viewBox={viewBox} className="iso" role="group" aria-label="Lab PCs, bench A at the back">
-            <defs>
-              <pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
-                <rect width="5" height="5" fill="var(--surface)" />
-                <rect width="1.4" height="5" fill="var(--line-strong)" />
-              </pattern>
-            </defs>
-
-            {/* room: floor outline and the instructor desk */}
-            <g aria-hidden>
-              <polygon points={pts(floor)} fill="var(--surface-2)" stroke="var(--line-2)" strokeDasharray="5 4" />
-              <polygon className="pc-bench" points={pts([P(3.6, rowsR + 0.0), P(8.4, rowsR + 0.0), P(8.4, rowsR + 0.6), P(3.6, rowsR + 0.6)])} />
-              <polygon className="pc-bench" points={pts([P(3.6, rowsR + 0.6), P(8.4, rowsR + 0.6), [P(8.4, rowsR + 0.6)[0], P(8.4, rowsR + 0.6)[1] + 9], [P(3.6, rowsR + 0.6)[0], P(3.6, rowsR + 0.6)[1] + 9]])} />
-              <text x={P(6, rowsR + 0.3)[0]} y={P(6, rowsR + 0.3)[1] + 4} className="pc-note" textAnchor="middle">
-                INSTRUCTOR
-              </text>
-            </g>
-
-            {/* seat numbers along the back wall */}
-            <g aria-hidden>
-              {Array.from({ length: COLS }).map((_, c) => (
-                <text key={c} x={P(c, -0.85)[0] + 6} y={P(c, -0.85)[1] - 20} className="pc-note" textAnchor="middle">
-                  {c + 1}
-                </text>
-              ))}
-            </g>
-
-            {letters.map((letter, r) => {
-              const rr = r * RF;
-              const bench = [P(-0.6, rr - 0.4), P(COLS - 0.4, rr - 0.4), P(COLS - 0.4, rr + 0.4), P(-0.6, rr + 0.4)];
-              const front = [bench[3], bench[2], [bench[2][0], bench[2][1] + 12], [bench[3][0], bench[3][1] + 12]] as [number, number][];
-              const legs = [bench[3], bench[2]].map((q, i) => (i === 0 ? `M${q[0] + 6} ${q[1] + 10} v18` : `M${q[0] - 6} ${q[1] + 10} v18`)).join(" ");
-              return (
-                <g key={letter}>
-                  <g aria-hidden>
-                    <path className="pc-bench" d={legs} fill="none" />
-                    <polygon className="pc-bench" points={pts(front)} />
-                    <path className="pc-bench pc-edge" d={`M${front[0][0]} ${front[0][1] + 4} L${front[1][0]} ${front[1][1] + 4}`} fill="none" />
-                    <polygon className="pc-bench" points={pts(bench)} />
-                    <text x={P(-0.6, rr)[0] - 10} y={P(-0.6, rr)[1] + 4} className="pc-row" textAnchor="end">
-                      {letter}
-                    </text>
-                  </g>
-                  {Array.from({ length: COLS }).map((__, c) => {
-                    const row = seats[r * COLS + c];
-                    const idx = r * COLS + c;
-                    if (!row) return loading ? <g key={c} aria-hidden className="pc-skel skeleton"><Pc c={c} rr={rr} st="ready" mode="progress" pct={0} ramp="var(--surface-3)" /></g> : null;
-                    const st = seatStatus(row);
-                    const t = mode === "spend" ? row.spendUsd / maxSpend : row.progressPct / 100;
-                    const ramp = mode === "status" ? undefined : rampFill(Math.round(t * 100));
-                    return (
-                      <Fragment key={row.id}>
-                      <g
-                        className={`pc${flash.has(row.id) ? " pc-flash" : ""}`}
-                        role="button"
-                        tabIndex={0}
-                        data-idx={idx}
-                        data-env-id={row.id}
-                        data-st={st}
-                        data-mode={mode}
-                        data-dim={(matched !== null && !matched.has(row.id)) || undefined}
-                        data-selected={selectedId === row.id || undefined}
-                        aria-label={`Bench ${letter} seat ${c + 1}, ${row.learnerName}, ${STATE_META[st].label}${row.failureReason ? `: ${row.failureReason}` : ""}, ${row.progressPct}% done, ${fmtUsd(row.spendUsd)} spent`}
-                        aria-pressed={selectedId === row.id}
-                        onClick={() => {
-                          setTip(null);
-                          onSelect(selectedId === row.id ? null : row.id);
-                        }}
-                        onKeyDown={(e) => activate(e, row.id)}
-                        onMouseEnter={(e) => showTip(row.id, e.currentTarget)}
-                        onFocus={(e) => showTip(row.id, e.currentTarget)}
-                        onBlur={() => setTip(null)}
-                      >
-                        <Pc c={c} rr={rr} st={st} mode={mode} pct={row.progressPct} ramp={ramp} />
-                      </g>
-                      </Fragment>
-                    );
-                  })}
-                  <g aria-hidden pointerEvents="none">
-                    {seats.slice(r * COLS, r * COLS + COLS).length === COLS || loading
-                      ? Array.from({ length: COLS }).map((__, c) => {
-                          const [tx, ty] = P(c + 0.42, rr - 0.3);
-                          return <Tower key={`t${c}`} x={tx} y={ty} />;
-                        })
-                      : null}
-                  </g>
-                </g>
-              );
-            })}
-          </svg>
-
-          {tip && tipRow && <SeatCard row={tipRow} x={tip.x} y={tip.y} below={tip.below} />}
-        </div>
-      </div>
-
-      <p className="px-4 pb-2 text-[12px] text-muted sm:hidden">Scroll sideways to see the whole lab, or use All learners for a list.</p>
-      <div className="flex flex-wrap items-center gap-x-1 gap-y-1 border-t border-line px-3 py-2.5">
-        {mode === "status" ? (
-          LEGEND_ORDER.map((s) => {
-            const on = statusFilter.has(s);
-            return (
-              <button
-                key={s}
-                data-st={s}
-                onClick={() => onToggleStatus(s)}
-                aria-pressed={on}
-                title={STATE_META[s].plain}
-                className={`flex items-center gap-2 rounded-md px-2 py-1 text-[12.5px] hover:bg-surface-3 ${on ? "bg-surface-3" : ""}`}
-              >
-                <LegendSwatch s={s} />
-                <span className="text-ink-2">{STATE_META[s].label}</span>
-                <span className="tnum text-muted">{counts[s]}</span>
-              </button>
-            );
-          })
-        ) : (
-          <div className="flex w-full flex-wrap items-center gap-3 px-1 text-[12px] text-muted">
-            <span>{mode === "spend" ? "$0" : "0%"}</span>
-            <span aria-hidden className="flex h-2 w-48 overflow-hidden rounded-sm border border-line">
-              {[0, 25, 50, 75, 100].map((pct) => <span key={pct} className="flex-1" style={{ background: rampFill(pct) }} />)}
-            </span>
-            <span className="tnum">{mode === "spend" ? fmtUsd(maxSpend) : "100%"}</span>
-            <span className="ml-auto">{mode === "spend" ? "Darker screen = more spent so far" : "Darker screen = further through the 12 steps"}</span>
+      <div
+        className="room-stage"
+        ref={host}
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "+" || e.key === "=") engine.current?.zoom(0.8);
+          if (e.key === "-") engine.current?.zoom(1.25);
+          if (e.key === "0") engine.current?.home();
+        }}
+      >
+        {error && (
+          <div className="room-fallback">
+            <h3>3D view is unavailable on this device.</h3>
+            <p>
+              Every learner, filter and action is still available in the list.
+            </p>
+            <button className="btn" onClick={props.onOpenTable}>
+              Open all learners
+            </button>
           </div>
         )}
+        {props.loading && (
+          <div className="room-loading" role="status">
+            Preparing your workshop…
+          </div>
+        )}
+        {hovered && (
+          <div className="room-hover" role="status">
+            <b>
+              {seatOf(hovered.id)} · {hovered.learnerName}
+            </b>
+            <span style={{ color: colors[seatStatus(hovered)] }}>
+              {STATE_META[seatStatus(hovered)].label} · {hovered.progressPct}%
+              complete
+            </span>
+            <span>{fmtUsd(hovered.spendUsd)} spent · Click to inspect</span>
+          </div>
+        )}
+        <div className="room-hint">
+          Drag to explore <span>·</span> Scroll to zoom <span>·</span>{" "}
+          Right-drag to orbit
+        </div>
+        <div className="room-navigation">
+          <button onClick={() => props.onSelect(null)} disabled={!selected}>
+            ↖ Entire lab
+          </button>
+          <div role="group" aria-label="Zoom lab">
+            <button
+              aria-label="Zoom out"
+              onClick={() => engine.current?.zoom(1.25)}
+            >
+              −
+            </button>
+            <button
+              aria-label="Zoom in"
+              onClick={() => engine.current?.zoom(0.8)}
+            >
+              +
+            </button>
+            <button onClick={() => engine.current?.home()}>Fit</button>
+          </div>
+        </div>
+        <div
+          className="room-minimap"
+          aria-label="Seat map, click a seat to focus"
+        >
+          {props.everyone
+            .slice()
+            .sort((a, b) => seatIndex(a.id) - seatIndex(b.id))
+            .map((r) => (
+              <button
+                key={r.id}
+                tabIndex={-1}
+                aria-label={`Focus seat ${seatOf(r.id)}, ${r.learnerName}`}
+                title={`${seatOf(r.id)} · ${r.learnerName}`}
+                onClick={() => props.onSelect(r.id)}
+                style={{
+                  background:
+                    props.selectedId === r.id
+                      ? "#eff8ff"
+                      : colors[seatStatus(r)],
+                }}
+              />
+            ))}
+        </div>
       </div>
-    </section>
-  );
-}
-
-function SeatCard({ row, x, y, below }: { row: EnvRow; x: number; y: number; below: boolean }) {
-  const st = seatStatus(row);
-  const active = row.state === "in_use" || row.state === "failed";
-  return (
-    <div className="seat-tip" data-st={st} style={{ left: x - 116, top: y, transform: below ? undefined : "translateY(-100%)" }} role="tooltip">
-      <div className="flex items-baseline justify-between gap-2">
-        <span className="truncate text-[13px] font-semibold text-ink">{row.learnerName}</span>
-        <span className="font-mono text-[11.5px] text-muted">{seatOf(row.id)}</span>
+      {props.mode !== "status" && <div className="room-scale"><span>{props.mode === "spend" ? "Spend per PC" : "Lab progress"}</span><b>{props.mode === "spend" ? "$0" : "0%"}</b><i/><b>{props.mode === "spend" ? fmtUsd(Math.max(0,...props.everyone.map(r=>r.spendUsd))) : "100%"}</b></div>}
+      <div className="room-legend">
+        {(Object.keys(counts) as SeatStatus[]).map((s) => (
+          <button
+            key={s}
+            aria-pressed={props.statusFilter.has(s)}
+            onClick={() => props.onToggleStatus(s)}
+          >
+            <i style={{ background: colors[s] }} />
+            {STATE_META[s].label} <b>{counts[s]}</b>
+          </button>
+        ))}
+        <button
+          className="seat-browser-toggle"
+          aria-expanded={seatList}
+          onClick={() => setSeatList(!seatList)}
+        >
+          Browse seats {seatList ? "−" : "+"}
+        </button>
       </div>
-      <div className="mt-1.5 flex items-center justify-between">
-        <StatusChip state={row.state} stuck={row.stuck} />
-        <span className="tnum text-[12.5px] text-ink-2">{fmtUsd(row.spendUsd)}</span>
-      </div>
-      {row.failureReason && <div className="mt-1.5 text-[12px] text-failed">{row.failureReason}</div>}
-      {active && row.step >= 1 && (
-        <div className="mt-1.5 text-[12px] leading-4 text-muted">
-          Step {row.step} of {row.totalSteps}: <span className="text-ink-2">{LAB_STEPS[row.step - 1]}</span>
-          <span className={row.stuck ? " font-medium text-stuck" : ""}> · {fmtMin(row.onStepMinutes)}</span>
+      {seatList && (
+        <div
+          className="seat-browser"
+          role="group"
+          aria-label="Lab PCs, bench A at the back"
+          onKeyDown={(e) => {
+            const delta = (
+              {
+                ArrowRight: 1,
+                ArrowLeft: -1,
+                ArrowDown: 12,
+                ArrowUp: -12,
+              } as Record<string, number>
+            )[e.key];
+            if (delta === undefined) return;
+            const t = (e.target as HTMLElement).closest("button");
+            if (!t) return;
+            e.preventDefault();
+            const buttons = Array.from(
+              e.currentTarget.querySelectorAll("button"),
+            );
+            const n = Math.max(
+              0,
+              Math.min(buttons.length - 1, buttons.indexOf(t) + delta),
+            );
+            buttons[n]?.focus();
+          }}
+        >
+          {props.everyone
+            .slice()
+            .sort((a, b) => seatIndex(a.id) - seatIndex(b.id))
+            .map((r, i) => (
+              <button
+                key={r.id}
+                data-env-id={r.id}
+                data-idx={i}
+                data-st={seatStatus(r)}
+                aria-pressed={r.id === props.selectedId}
+                onClick={() => props.onSelect(r.id)}
+              >
+                <b>{seatOf(r.id)}</b>
+                <span>{r.learnerName}</span>
+                <small>{STATE_META[seatStatus(r)].label}</small>
+              </button>
+            ))}
         </div>
       )}
-      {row.state === "deprovisioned" && <div className="mt-1.5 text-[12px] text-muted">Completed all {row.totalSteps} steps</div>}
-      {(row.state === "ready" || row.state === "provisioning") && <div className="mt-1.5 text-[12px] text-muted">Hasn&apos;t started the lab</div>}
-    </div>
+    </section>
   );
-}
+                   }
