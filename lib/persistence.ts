@@ -475,4 +475,3 @@ export function resetPersistenceCache() {
   lastRefreshAt = 0;
   demoMem.clear();
 }
-}
