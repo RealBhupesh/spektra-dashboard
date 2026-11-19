@@ -1,7 +1,7 @@
 import { Environment, SessionSummary } from "./types";
 import { seedEnvironments } from "./seed";
 import { computeState, ReprovisionEvent, SESSION_NAME, SEED } from "./replay";
-import { appendAction, appendDemoAction, DEMO_LIFETIME_MS, loadDemoSession, loadPersisted, saveAnchor } from "./persistence";
+import { appendAction, appendDemoAction, DEMO_LIFETIME_MS, loadDemoSession, loadDemoSessionFresh, loadPersisted, loadPersistedFresh, saveAnchor } from "./persistence";
 import { progressPct, spendUsd, isStuck } from "./filters";
 
 // State model: the seeded cohort plus every subsequent transition is a pure
@@ -53,17 +53,41 @@ export async function getSnapshot(now = Date.now(), demoId: string | null = null
 export async function reprovision(id: string, now = Date.now(), demoId: string | null = null): Promise<{ environment: Environment; stateVersion: number; action: ReprovisionEvent | null } | null> {
   const { sessionStartedAt, log } = await live(now, demoId);
   const seeded = seedEnvironments(SEED, sessionStartedAt);
-  const envs = computeState(seeded, sessionStartedAt, log, now);
+  // Evaluate at the log's newest event, not only at this request's `now`: a
+  // concurrent instance's event can be stamped later than our `now`, and
+  // treating it as still-in-the-future would both misreport the state and
+  // reopen the double-restart race the epoch key closes.
+  const evalAt = Math.max(now, ...log.map((ev) => ev.at));
+  const envs = computeState(seeded, sessionStartedAt, log, evalAt);
   const e = envs.find((x) => x.id === id);
   if (!e) return null;
   if (e.state !== "failed") return { environment: e, stateVersion: log.length, action: null }; // no-op unless failed; reflected as-is
   // The action only counts if it is durably appended to the shared log; a
-  // failed write must fail the request, not report an ephemeral change.
+  // failed write must fail the request, not report an ephemeral change. The
+  // append is keyed by the per-target epoch this decision observed - the
+  // number of prior restarts of THIS environment in the log - so two
+  // concurrent restarts of it conflict in the store instead of
+  // double-appending, even when the racers' cached global log lengths
+  // differ because of unrelated events for other environments.
   const action = { id, at: now };
-  const saved = await (demoId === null ? appendAction(action) : appendDemoAction(demoId, action));
-  if (!saved) throw new Error("persist_failed");
+  const targetEpoch = log.filter((ev) => ev.id === id).length;
+  const outcome = await (demoId === null ? appendAction(action, targetEpoch) : appendDemoAction(demoId, action, targetEpoch));
+  if (outcome === "error") throw new Error("persist_failed");
+  if (outcome === "conflict") {
+    // A concurrent request already restarted this environment from the same
+    // observed state and won the key. Reload past the refresh window and
+    // report the true resulting state as a no-op, never a second restart.
+    const fresh = demoId === null ? await loadPersistedFresh() : await loadDemoSessionFresh(demoId, now);
+    // The winner's event can be stamped later than this request's `now`
+    // (both clocks moved during the race); evaluate at the log's newest
+    // event so the winning restart is not treated as still in the future.
+    const evalAt = fresh ? Math.max(now, ...fresh.reprovisionLog.map((ev) => ev.at)) : now;
+    const e2 = fresh && computeState(seeded, fresh.sessionStartedAt, fresh.reprovisionLog, evalAt).find((x) => x.id === id);
+    if (!e2 || e2.state === "failed") throw new Error("persist_failed"); // winner's write not visible: fail visibly
+    return { environment: e2, stateVersion: fresh.reprovisionLog.length, action: null };
+  }
   const nextLog = [...log, action];
-  return { environment: computeState(seeded, sessionStartedAt, nextLog, now).find((x) => x.id === id)!, stateVersion: nextLog.length, action };
+  return { environment: computeState(seeded, sessionStartedAt, nextLog, evalAt).find((x) => x.id === id)!, stateVersion: nextLog.length, action };
 }
 
 export function summarizeSnapshot({ now, sessionStartedAt, environments: envs }: Awaited<ReturnType<typeof getSnapshot>>): SessionSummary {
