@@ -1612,4 +1612,4 @@ function PcPanel({
       </div>
     </section>
   );
-        }
+}
