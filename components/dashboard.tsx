@@ -1,9 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { LAB_STEPS } from "@/lib/seed";
+import { LabAgent } from "./lab-agent";
 import { FloorMap, type ColorMode } from "./floor-map";
-import { ActivityPulse, AttentionQueue, StepFunnel, TopSpenders, type Transition } from "./ops-graphics";
+import {
+  ActivityPulse,
+  AttentionQueue,
+  StepFunnel,
+  TopSpenders,
+  type Transition,
+} from "./ops-graphics";
 import {
   CHIP_ORDER,
   type EnvRow,
@@ -35,7 +49,14 @@ type View = "floor" | "table";
 const POLL_MS = 4000;
 const HISTORY = 45;
 const DEMO_SESSION_KEY = "cloudlabs-demo-session";
-const EMPTY_ADV = { stuck: false, step: "", minStepMinutes: "", minProgressPct: "", maxProgressPct: "", minSpend: "" };
+const EMPTY_ADV = {
+  stuck: false,
+  step: "",
+  minStepMinutes: "",
+  minProgressPct: "",
+  maxProgressPct: "",
+  minSpend: "",
+};
 
 export default function Dashboard() {
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -46,7 +67,9 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
   const [lastOkAt, setLastOkAt] = useState<number | null>(null);
-  const [history, setHistory] = useState<{ t: number; spend: number; attention: number }[]>([]);
+  const [history, setHistory] = useState<
+    { t: number; spend: number; attention: number }[]
+  >([]);
   const [, setTick] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>();
   const [sessionPending, setSessionPending] = useState(false);
@@ -55,6 +78,10 @@ export default function Dashboard() {
   const sessionGeneration = useRef(0);
 
   const [view, setView] = useState<View>("floor");
+  const [agentOpen, setAgentOpen] = useState(false);
+  const [dock, setDock] = useState<
+    "attention" | "steps" | "spend" | "activity" | null
+  >(null);
   const [mode, setMode] = useState<ColorMode>("status");
   const [theme, setTheme] = useState<"light" | "dark">("light");
 
@@ -65,7 +92,11 @@ export default function Dashboard() {
   const [nlApplied, setNlApplied] = useState<NLApplied | null>(null);
   const [nlError, setNlError] = useState<string | null>(null);
   const [nlBusy, setNlBusy] = useState(false);
-  const [nlSuggestion, setNlSuggestion] = useState<{ text: string; description: string[]; filter: Record<string, unknown> } | null>(null);
+  const [nlSuggestion, setNlSuggestion] = useState<{
+    text: string;
+    description: string[];
+    filter: Record<string, unknown>;
+  } | null>(null);
   const nlRequest = useRef<AbortController | null>(null);
 
   // Advanced manual controls: the same predicates the NL filter compiles to,
@@ -92,7 +123,13 @@ export default function Dashboard() {
     activeSession.current = restoredSession;
     setSessionId(restoredSession);
     const attr = document.documentElement.dataset.theme;
-    setTheme(attr === "dark" || attr === "light" ? attr : window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    setTheme(
+      attr === "dark" || attr === "light"
+        ? attr
+        : window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light",
+    );
     const t = window.setInterval(() => setTick((n) => n + 1), 1000);
     return () => window.clearInterval(t);
   }, []);
@@ -121,29 +158,56 @@ export default function Dashboard() {
   const params = useMemo(() => {
     const p = new URLSearchParams();
     const f = (nlApplied?.filter ?? {}) as Record<string, unknown>;
-    for (const k of ["step", "minStepMinutes", "minProgressPct", "maxProgressPct", "minSpend"] as const) {
+    for (const k of [
+      "step",
+      "minStepMinutes",
+      "minProgressPct",
+      "maxProgressPct",
+      "minSpend",
+    ] as const) {
       const manual = adv[k].trim();
       if (manual !== "" && Number.isFinite(Number(manual))) p.set(k, manual);
       else if (typeof f[k] === "number") {
         p.set(k, String(f[k]));
-        const excl = { step: null, minStepMinutes: "minStepMinutesExclusive", minProgressPct: "minProgressExclusive", maxProgressPct: "maxProgressExclusive", minSpend: "minSpendExclusive" }[k];
+        const excl = {
+          step: null,
+          minStepMinutes: "minStepMinutesExclusive",
+          minProgressPct: "minProgressExclusive",
+          maxProgressPct: "maxProgressExclusive",
+          minSpend: "minSpendExclusive",
+        }[k];
         if (excl && f[excl] === true) p.set(excl, "1");
       }
     }
     if (adv.stuck || f.stuck === true) p.set("stuck", "1");
-    const states = stateFilter.length ? stateFilter.join(",") : Array.isArray(f.states) ? (f.states as string[]).join(",") : "";
+    const states = stateFilter.length
+      ? stateFilter.join(",")
+      : Array.isArray(f.states)
+        ? (f.states as string[]).join(",")
+        : "";
     if (states) p.set("states", states);
     // A seat label ("B7") searches for the PC in that seat.
     const typed = search.trim();
-    const q = (typed && (idOfSeat(typed) ?? typed)) || (typeof f.q === "string" ? f.q : "");
+    const q =
+      (typed && (idOfSeat(typed) ?? typed)) ||
+      (typeof f.q === "string" ? f.q : "");
     if (q) p.set("q", q);
     p.set("sort", sortBy);
-    if (f.sort === sortBy && (f.order === "asc" || f.order === "desc")) p.set("order", f.order);
-    else if (sortBy === "spend" || sortBy === "stepMinutes" || sortBy === "progress") p.set("order", "desc");
+    if (f.sort === sortBy && (f.order === "asc" || f.order === "desc"))
+      p.set("order", f.order);
+    else if (
+      sortBy === "spend" ||
+      sortBy === "stepMinutes" ||
+      sortBy === "progress"
+    )
+      p.set("order", "desc");
     return p;
   }, [stateFilter, search, sortBy, nlApplied, adv]);
 
-  const hasFilter = useMemo(() => [...params.keys()].some((k) => k !== "sort" && k !== "order"), [params]);
+  const hasFilter = useMemo(
+    () => [...params.keys()].some((k) => k !== "sort" && k !== "order"),
+    [params],
+  );
 
   // Superseded responses are discarded: a slow earlier poll must never
   // overwrite fresher rows.
@@ -163,12 +227,17 @@ export default function Dashboard() {
     let errorMessage = "Live data unavailable.";
     let sessionGone = false;
     try {
-      const eRes = await fetch(`/api/environments?${params.toString()}&include=all`, {
-        cache: "no-store",
-        headers: sessionId ? { "x-demo-session": sessionId } : undefined,
-      });
+      const eRes = await fetch(
+        `/api/environments?${params.toString()}&include=all`,
+        {
+          cache: "no-store",
+          headers: sessionId ? { "x-demo-session": sessionId } : undefined,
+        },
+      );
       if (!eRes.ok) {
-        sessionGone = Boolean(sessionId && (eRes.status === 404 || eRes.status === 410));
+        sessionGone = Boolean(
+          sessionId && (eRes.status === 404 || eRes.status === 410),
+        );
         errorMessage = sessionGone
           ? "This isolated demo is no longer available. Start a new demo or return to the shared session."
           : `Live data unavailable (${eRes.status === 503 ? "storage unavailable" : `server ${eRes.status}`}).`;
@@ -179,7 +248,9 @@ export default function Dashboard() {
       if (Array.isArray(e.actions)) {
         if (pendingActions.current.size) {
           const present = new Set(
-            (e.actions as { id?: unknown; at?: unknown }[]).map((a) => `${String(a?.id)}:${String(a?.at)}`),
+            (e.actions as { id?: unknown; at?: unknown }[]).map(
+              (a) => `${String(a?.id)}:${String(a?.at)}`,
+            ),
           );
           if ([...pendingActions.current.keys()].some((k) => !present.has(k))) {
             return; // stale instance cache: a confirmed action is missing; keep the current view
@@ -207,7 +278,9 @@ export default function Dashboard() {
       }
       const s = e.summary as Summary;
       const nextRows = e.environments as EnvRow[];
-      const all = Array.isArray(e.everyone) ? (e.everyone as EnvRow[]) : nextRows;
+      const all = Array.isArray(e.everyone)
+        ? (e.everyone as EnvRow[])
+        : nextRows;
 
       // Stuck is a threshold crossing, not a state: compare derived status.
       const changed = new Set<string>();
@@ -222,12 +295,23 @@ export default function Dashboard() {
         window.setTimeout(() => setFlash(new Set()), 1000);
       }
       setSummary(s);
-      setTransitions(Array.isArray(e.transitions) ? (e.transitions as Transition[]) : []);
+      setTransitions(
+        Array.isArray(e.transitions) ? (e.transitions as Transition[]) : [],
+      );
       setRows(nextRows);
       setEveryone(all);
       setFilteredCount(e.filtered);
       setHistory((h) =>
-        h.length && h[h.length - 1].t === s.now ? h : [...h, { t: s.now, spend: s.estimatedSpend, attention: s.failures + s.stuckCount }].slice(-HISTORY),
+        h.length && h[h.length - 1].t === s.now
+          ? h
+          : [
+              ...h,
+              {
+                t: s.now,
+                spend: s.estimatedSpend,
+                attention: s.failures + s.stuckCount,
+              },
+            ].slice(-HISTORY),
       );
       setFetchError(null);
       setLastOkAt(Date.now());
@@ -278,7 +362,10 @@ export default function Dashboard() {
     };
   }, [poll]);
 
-  const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null);
+  const [actionError, setActionError] = useState<{
+    id: string;
+    message: string;
+  } | null>(null);
   const selectSession = (id: string | null) => {
     ++pollSeq.current;
     ++sessionGeneration.current;
@@ -315,10 +402,13 @@ export default function Dashboard() {
       const res = await fetch("/api/session", { method: "POST" });
       if (!res.ok) throw new Error(`server ${res.status}`);
       const { id } = await res.json();
-      if (typeof id !== "string" || !id) throw new Error("missing demo session id");
+      if (typeof id !== "string" || !id)
+        throw new Error("missing demo session id");
       selectSession(id);
     } catch {
-      setSessionError("Could not start an isolated demo. Try again in a moment.");
+      setSessionError(
+        "Could not start an isolated demo. Try again in a moment.",
+      );
     } finally {
       setSessionPending(false);
     }
@@ -337,24 +427,36 @@ export default function Dashboard() {
         if (!res.ok) throw new Error(`server ${res.status}`);
         const body = await res.json().catch(() => null);
         const confirmed =
-          body && body.action && typeof body.action.id === "string" && typeof body.action.at === "number"
+          body &&
+          body.action &&
+          typeof body.action.id === "string" &&
+          typeof body.action.at === "number"
             ? (body.action as { id: string; at: number })
             : null;
         if (confirmed && generation === sessionGeneration.current) {
           // Hold the pending state until a poll from ANY instance INCLUDES
           // this exact append; a stale instance's snapshot is discarded by
           // the inclusion check in poll() instead of rolling the row back.
-          pendingActions.current.set(`${confirmed.id}:${confirmed.at}`, confirmed.id);
+          pendingActions.current.set(
+            `${confirmed.id}:${confirmed.at}`,
+            confirmed.id,
+          );
         }
         if (generation === sessionGeneration.current) await poll();
       } catch {
         if (generation === sessionGeneration.current) {
-          setActionError({ id, message: `Reprovision of ${id} (seat ${seatOf(id)}) failed.` });
+          setActionError({
+            id,
+            message: `Reprovision of ${id} (seat ${seatOf(id)}) failed.`,
+          });
         }
       } finally {
         // Without a gate the pending ends with the follow-up poll, as before;
         // with one, poll() releases it once the action is visible here.
-        if (generation === sessionGeneration.current && ![...pendingActions.current.values()].includes(id)) {
+        if (
+          generation === sessionGeneration.current &&
+          ![...pendingActions.current.values()].includes(id)
+        ) {
           setPending((p) => {
             const n = new Set(p);
             n.delete(id);
@@ -398,16 +500,29 @@ export default function Dashboard() {
       } else {
         const f = (data.filter ?? {}) as Record<string, unknown>;
         if (data.requiresConfirmation) {
-          setNlSuggestion({ text, description: data.description ?? [], filter: f });
+          setNlSuggestion({
+            text,
+            description: data.description ?? [],
+            filter: f,
+          });
         } else {
-          setNlApplied({ text, description: data.description ?? [], source: data.source, degraded: !!data.degraded, filter: f });
+          setNlApplied({
+            text,
+            description: data.description ?? [],
+            source: data.source,
+            degraded: !!data.degraded,
+            filter: f,
+          });
           if (data.degraded && data.message) setNlError(data.message);
           if (typeof f.sort === "string") setSortBy(f.sort);
           setNlText("");
         }
       }
     } catch {
-      if (!request.signal.aborted) setNlError("Natural-language filter unavailable right now. Manual filters below still work.");
+      if (!request.signal.aborted)
+        setNlError(
+          "Natural-language filter unavailable right now. Manual filters below still work.",
+        );
     } finally {
       if (!request.signal.aborted) {
         nlRequest.current = null;
@@ -444,19 +559,32 @@ export default function Dashboard() {
         return;
       }
       if (ev.key === "Escape") {
+        setAgentOpen(false);
         setSelectedId(null);
         return;
       }
-      if (view === "table" && (ev.key === "ArrowDown" || ev.key === "ArrowUp")) {
+      if (
+        view === "table" &&
+        (ev.key === "ArrowDown" || ev.key === "ArrowUp")
+      ) {
         ev.preventDefault();
-        const cur = rowRefs.current.findIndex((r) => r === document.activeElement);
-        const next = ev.key === "ArrowDown" ? Math.min(rows.length - 1, cur + 1) : Math.max(0, cur - 1);
+        const cur = rowRefs.current.findIndex(
+          (r) => r === document.activeElement,
+        );
+        const next =
+          ev.key === "ArrowDown"
+            ? Math.min(rows.length - 1, cur + 1)
+            : Math.max(0, cur - 1);
         rowRefs.current[next]?.focus();
       } else if (ev.key === "r") {
         // Resolve by the focused element's stable id; polls reorder rows.
-        const id = (document.activeElement as HTMLElement | null)?.dataset?.envId;
-        const row = id ? everyone.find((r) => r.id === id) ?? rows.find((r) => r.id === id) : undefined;
-        if (row && row.state === "failed" && !pending.has(row.id)) reprovision(row.id);
+        const id = (document.activeElement as HTMLElement | null)?.dataset
+          ?.envId;
+        const row = id
+          ? (everyone.find((r) => r.id === id) ?? rows.find((r) => r.id === id))
+          : undefined;
+        if (row && row.state === "failed" && !pending.has(row.id))
+          reprovision(row.id);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -464,65 +592,152 @@ export default function Dashboard() {
   }, [rows, everyone, pending, reprovision, view]);
 
   rowRefs.current = [];
-  const toggleState = (s: EnvState) => setStateFilter((cur) => (cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s]));
+  const toggleState = (s: EnvState) =>
+    setStateFilter((cur) =>
+      cur.includes(s) ? cur.filter((x) => x !== s) : [...cur, s],
+    );
   const statusFilter = useMemo(() => {
     const set = new Set<SeatStatus>(stateFilter);
     if (adv.stuck) set.add("stuck");
     return set;
   }, [stateFilter, adv.stuck]);
-  const toggleStatus = (s: SeatStatus) => (s === "stuck" ? setAdv((a) => ({ ...a, stuck: !a.stuck })) : toggleState(s));
+  const toggleStatus = (s: SeatStatus) =>
+    s === "stuck" ? setAdv((a) => ({ ...a, stuck: !a.stuck })) : toggleState(s);
 
   const advActive =
-    (adv.stuck ? 1 : 0) + (["step", "minStepMinutes", "minProgressPct", "maxProgressPct", "minSpend"] as const).filter((k) => adv[k] !== "").length;
-  const matched = useMemo(() => (hasFilter ? new Set(rows.map((r) => r.id)) : null), [hasFilter, rows]);
-  const selected = everyone.find((r) => r.id === selectedId) ?? rows.find((r) => r.id === selectedId) ?? null;
-  const elapsed = summary ? fmtClock(Date.now() - summary.sessionStartedAt) : "–";
-  const burn = everyone.filter((r) => r.state !== "deprovisioned").reduce((s, r) => s + r.ratePerHour, 0);
+    (adv.stuck ? 1 : 0) +
+    (
+      [
+        "step",
+        "minStepMinutes",
+        "minProgressPct",
+        "maxProgressPct",
+        "minSpend",
+      ] as const
+    ).filter((k) => adv[k] !== "").length;
+  const matched = useMemo(
+    () => (hasFilter ? new Set(rows.map((r) => r.id)) : null),
+    [hasFilter, rows],
+  );
+  const selected =
+    everyone.find((r) => r.id === selectedId) ??
+    rows.find((r) => r.id === selectedId) ??
+    null;
+  const elapsed = summary
+    ? fmtClock(Date.now() - summary.sessionStartedAt)
+    : "–";
+  const burn = everyone
+    .filter((r) => r.state !== "deprovisioned")
+    .reduce((s, r) => s + r.ratePerHour, 0);
   const attention = summary ? summary.failures + summary.stuckCount : 0;
 
   return (
-    <div className="min-h-screen">
+    <div
+      className={`min-h-screen spatial-dashboard ${selectedId ? "has-inspector" : ""}`}
+    >
       <header className="topbar sticky top-0 z-30">
         <div className="mx-auto flex h-12 max-w-[1480px] items-center gap-6 px-4 sm:px-6">
-          <h1 className="shrink-0 text-[14px] font-semibold tracking-[-0.01em] text-ink">CloudLabs</h1>
-          <nav className="hidden items-center gap-5 sm:flex" role="tablist" aria-label="View">
-            <button role="tab" className="tab" aria-selected={view === "floor"} onClick={() => switchView("floor")}>
+          <h1 className="shrink-0 text-[14px] font-semibold tracking-[-0.01em] text-ink">
+            CloudLabs
+          </h1>
+          <nav
+            className="hidden items-center gap-5 sm:flex"
+            role="tablist"
+            aria-label="View"
+          >
+            <button
+              role="tab"
+              className="tab"
+              aria-selected={view === "floor"}
+              onClick={() => switchView("floor")}
+            >
               Floor map
             </button>
-            <button role="tab" className="tab" aria-selected={view === "table"} onClick={() => switchView("table")}>
+            <button
+              role="tab"
+              className="tab"
+              aria-selected={view === "table"}
+              onClick={() => switchView("table")}
+            >
               All learners
             </button>
           </nav>
           <div className="ml-auto flex items-center gap-4">
-            <span className="live" data-stale={fetchError ? "true" : undefined} aria-live="polite">
+            <span
+              className="live"
+              data-stale={fetchError ? "true" : undefined}
+              aria-live="polite"
+            >
               <span aria-hidden className="live-dot" />
               {fetchError ? "Reconnecting" : "Live"}
             </span>
-            <span className="tnum hidden text-[12px] text-muted md:inline">{elapsed} elapsed</span>
-            <span className="tnum text-[12px] text-muted">
-              <span className="text-ink">{summary ? fmtUsd(summary.estimatedSpend) : "–"}</span> spent
+            <span className="tnum hidden text-[12px] text-muted md:inline">
+              {elapsed} elapsed
             </span>
-            <button className="icon-btn" onClick={toggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}>
-              {theme === "dark" ? <Icon.Sun size={15} /> : <Icon.Moon size={15} />}
+            <span className="tnum text-[12px] text-muted">
+              <span className="text-ink">
+                {summary ? fmtUsd(summary.estimatedSpend) : "–"}
+              </span>{" "}
+              spent
+            </span>
+            <button
+              className="icon-btn"
+              onClick={toggleTheme}
+              aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            >
+              {theme === "dark" ? (
+                <Icon.Sun size={15} />
+              ) : (
+                <Icon.Moon size={15} />
+              )}
             </button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1480px] px-4 pb-12 pt-6 sm:px-6">
-        <div className="mb-5 flex flex-wrap items-end justify-between gap-2">
+      <main
+        className={`spatial-main mx-auto px-4 pb-12 pt-6 sm:px-6 ${selectedId || agentOpen ? "inspector-open" : ""}`}
+      >
+        <div className="workshop-heading mb-5 flex flex-wrap items-end justify-between gap-2">
           <div>
-            <div className="text-[12.5px] text-muted">{sessionId ? "Isolated demo · Simulated data" : "Simulated workshop"}</div>
-            <div className="mt-0.5 text-[20px] font-semibold tracking-[-0.015em] text-ink">{summary?.sessionName ?? (fetchError ? "Workshop dashboard" : "Loading session…")}</div>
+            <div className="text-[12.5px] text-muted">
+              {sessionId
+                ? "Isolated demo · Simulated data"
+                : "Simulated workshop"}
+            </div>
+            <div className="mt-0.5 text-[20px] font-semibold tracking-[-0.015em] text-ink">
+              {summary?.sessionName ??
+                (fetchError ? "Workshop dashboard" : "Loading session…")}
+            </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            {sessionId && <button onClick={() => selectSession(null)} disabled={sessionPending} className="btn btn-sm">Return to shared</button>}
-            <button onClick={startDemo} disabled={sessionId === undefined || sessionPending} className="btn btn-sm">
-              {sessionPending ? "Starting demo…" : sessionId ? "Start new demo" : "Start isolated demo"}
+            {sessionId && (
+              <button
+                onClick={() => selectSession(null)}
+                disabled={sessionPending}
+                className="btn btn-sm"
+              >
+                Return to shared
+              </button>
+            )}
+            <button
+              onClick={startDemo}
+              disabled={sessionId === undefined || sessionPending}
+              className="btn btn-sm"
+            >
+              {sessionPending
+                ? "Starting demo…"
+                : sessionId
+                  ? "Start new demo"
+                  : "Start isolated demo"}
             </button>
           </div>
         </div>
-        {sessionError && <p role="alert" className="note-warn mb-3">{sessionError}</p>}
+        {sessionError && (
+          <p role="alert" className="note-warn mb-3">
+            {sessionError}
+          </p>
+        )}
 
         {/* Stats */}
         <div className="command-band panel stats">
@@ -534,12 +749,27 @@ export default function Dashboard() {
               summary ? (
                 <>
                   <div className="stackbar" aria-hidden>
-                    {(["in_use", "failed", "provisioning", "ready", "deprovisioned"] as const).map((s) =>
-                      summary.byState[s] > 0 ? <span key={s} data-st={s} style={{ flex: summary.byState[s] }} /> : null,
+                    {(
+                      [
+                        "in_use",
+                        "failed",
+                        "provisioning",
+                        "ready",
+                        "deprovisioned",
+                      ] as const
+                    ).map((s) =>
+                      summary.byState[s] > 0 ? (
+                        <span
+                          key={s}
+                          data-st={s}
+                          style={{ flex: summary.byState[s] }}
+                        />
+                      ) : null,
                     )}
                   </div>
                   <div className="stat-sub tnum">
-                    {summary.byState.in_use} in use, {summary.byState.ready} ready, {summary.byState.deprovisioned} finished
+                    {summary.byState.in_use} in use, {summary.byState.ready}{" "}
+                    ready, {summary.byState.deprovisioned} finished
                   </div>
                 </>
               ) : null
@@ -549,8 +779,20 @@ export default function Dashboard() {
             label="Need help"
             value={summary ? String(attention) : "–"}
             valueClass={attention > 0 ? "text-failed" : undefined}
-            trend={<Sparkline values={history.map((h) => h.attention)} label="Learners needing help" />}
-            sub={summary ? <div className="stat-sub tnum">{summary.failures} PCs failed, {summary.stuckCount} learners stuck 20m+</div> : null}
+            trend={
+              <Sparkline
+                values={history.map((h) => h.attention)}
+                label="Learners needing help"
+              />
+            }
+            sub={
+              summary ? (
+                <div className="stat-sub tnum">
+                  {summary.failures} PCs failed, {summary.stuckCount} learners
+                  stuck 20m+
+                </div>
+              ) : null
+            }
           />
           <Stat
             label="Average progress"
@@ -559,9 +801,18 @@ export default function Dashboard() {
               summary ? (
                 <>
                   <div className="mt-2.5 h-1 bg-surface-3">
-                    <div className="h-full" style={{ width: `${summary.avgCompletionPct}%`, background: "var(--ink-2)" }} />
+                    <div
+                      className="h-full"
+                      style={{
+                        width: `${summary.avgCompletionPct}%`,
+                        background: "var(--ink-2)",
+                      }}
+                    />
                   </div>
-                  <div className="stat-sub tnum">{summary.byState.deprovisioned} learners finished all 12 steps</div>
+                  <div className="stat-sub tnum">
+                    {summary.byState.deprovisioned} learners finished all 12
+                    steps
+                  </div>
                 </>
               ) : null
             }
@@ -569,13 +820,21 @@ export default function Dashboard() {
           <Stat
             label="Spent so far"
             value={summary ? fmtUsd(summary.estimatedSpend) : "–"}
-            trend={<Sparkline values={history.map((h) => h.spend)} label="Spend" />}
-            sub={everyone.length ? <div className="stat-sub tnum">{fmtUsd(burn)} per hour right now</div> : null}
+            trend={
+              <Sparkline values={history.map((h) => h.spend)} label="Spend" />
+            }
+            sub={
+              everyone.length ? (
+                <div className="stat-sub tnum">
+                  {fmtUsd(burn)} per hour right now
+                </div>
+              ) : null
+            }
           />
         </div>
 
         {/* Filters */}
-        <div className="mt-6 flex flex-col gap-3 lg:flex-row lg:items-center">
+        <div className="search-toolbar mt-6 flex flex-col gap-3 lg:flex-row lg:items-center">
           <div className="relative flex-1">
             <input
               ref={nlRef}
@@ -591,11 +850,18 @@ export default function Dashboard() {
             />
             <div className="absolute right-1 top-1/2 flex -translate-y-1/2 items-center gap-1">
               {(nlApplied || nlBusy) && (
-                <button onClick={clearNL} className="btn btn-sm border-transparent">
+                <button
+                  onClick={clearNL}
+                  className="btn btn-sm border-transparent"
+                >
                   {nlApplied ? "Clear filter" : "Cancel"}
                 </button>
               )}
-              <button onClick={applyNL} disabled={nlBusy || !nlText.trim()} className="btn btn-sm btn-primary">
+              <button
+                onClick={applyNL}
+                disabled={nlBusy || !nlText.trim()}
+                className="btn btn-sm btn-primary"
+              >
                 {nlBusy ? "…" : "Apply"}
               </button>
             </div>
@@ -617,14 +883,23 @@ export default function Dashboard() {
         {nlSuggestion && (
           <div className="note-info mt-2 flex flex-wrap items-center gap-2">
             <span className="text-ink-2">
-              <span className="font-medium text-ink">Suggested reading:</span> {nlSuggestion.description.join("; ") || "no filter"} for &ldquo;{nlSuggestion.text}&rdquo;
+              <span className="font-medium text-ink">Suggested reading:</span>{" "}
+              {nlSuggestion.description.join("; ") || "no filter"} for &ldquo;
+              {nlSuggestion.text}&rdquo;
             </span>
             <span className="ml-auto flex gap-2">
               <button
                 onClick={() => {
-                  setNlApplied({ text: nlSuggestion.text, description: nlSuggestion.description, source: "llm", degraded: false, filter: nlSuggestion.filter });
+                  setNlApplied({
+                    text: nlSuggestion.text,
+                    description: nlSuggestion.description,
+                    source: "llm",
+                    degraded: false,
+                    filter: nlSuggestion.filter,
+                  });
                   setNlSuggestion(null);
-                  if (typeof nlSuggestion.filter.sort === "string") setSortBy(nlSuggestion.filter.sort);
+                  if (typeof nlSuggestion.filter.sort === "string")
+                    setSortBy(nlSuggestion.filter.sort);
                   setNlText("");
                 }}
                 aria-label="Apply suggested filter"
@@ -632,7 +907,10 @@ export default function Dashboard() {
               >
                 Apply
               </button>
-              <button onClick={() => setNlSuggestion(null)} className="btn btn-sm">
+              <button
+                onClick={() => setNlSuggestion(null)}
+                className="btn btn-sm"
+              >
                 Dismiss
               </button>
             </span>
@@ -640,15 +918,28 @@ export default function Dashboard() {
         )}
         {nlApplied && (
           <p className="note-info mt-2 text-ink-2">
-            <span className="font-medium text-ink">{nlApplied.source === "llm" ? "AI filter:" : "Filter:"}</span> {nlApplied.text}
-            {nlApplied.description.length > 0 && <span className="text-muted"> ( {nlApplied.description.join("; ")} )</span>}
+            <span className="font-medium text-ink">
+              {nlApplied.source === "llm" ? "AI filter:" : "Filter:"}
+            </span>{" "}
+            {nlApplied.text}
+            {nlApplied.description.length > 0 && (
+              <span className="text-muted">
+                {" "}
+                ( {nlApplied.description.join("; ")} )
+              </span>
+            )}
             <span className="text-muted">
-              {" "}compiled {nlApplied.source === "llm" ? "by the AI model, confirmed by you" : "by the offline compiler, no model used"}
+              {" "}
+              compiled{" "}
+              {nlApplied.source === "llm"
+                ? "by the AI model, confirmed by you"
+                : "by the offline compiler, no model used"}
               {stateFilter.length > 0 && Array.isArray(nlApplied.filter.states)
                 ? "; your state buttons override the filter's states"
                 : search.trim() && typeof nlApplied.filter.q === "string"
                   ? "; your search overrides the filter's name"
-                  : (stateFilter.length > 0 || search.trim()) && "; combined with your manual filters"}
+                  : (stateFilter.length > 0 || search.trim()) &&
+                    "; combined with your manual filters"}
             </span>
           </p>
         )}
@@ -658,16 +949,29 @@ export default function Dashboard() {
           </p>
         )}
 
-        <div className="mt-3 flex flex-wrap items-center gap-2">
+        <div className="status-toolbar mt-3 flex flex-wrap items-center gap-2">
           {CHIP_ORDER.map((s) => (
-            <button key={s} onClick={() => toggleState(s)} aria-pressed={stateFilter.includes(s)} data-st={s} className="chip">
+            <button
+              key={s}
+              onClick={() => toggleState(s)}
+              aria-pressed={stateFilter.includes(s)}
+              data-st={s}
+              className="chip"
+            >
               <span aria-hidden className="glyph" />
               {STATE_META[s].label}
-              <span className="chip-count tnum">{summary ? summary.byState[s] : ""}</span>
+              <span className="chip-count tnum">
+                {summary ? summary.byState[s] : ""}
+              </span>
             </button>
           ))}
           {view === "table" && (
-            <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} aria-label="Sort by" className="control h-[30px] text-[12.5px]">
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value)}
+              aria-label="Sort by"
+              className="control h-[30px] text-[12.5px]"
+            >
               <option value="risk">Sort: needs help first</option>
               <option value="name">Sort: name</option>
               <option value="progress">Sort: progress</option>
@@ -675,56 +979,128 @@ export default function Dashboard() {
               <option value="stepMinutes">Sort: longest on step</option>
             </select>
           )}
-          <button onClick={() => setAdvOpen((v) => !v)} aria-expanded={advOpen} className="btn btn-sm h-[30px]">
+          <button
+            onClick={() => setAdvOpen((v) => !v)}
+            aria-expanded={advOpen}
+            className="btn btn-sm h-[30px]"
+          >
             More filters{advActive > 0 ? ` (${advActive})` : ""}
           </button>
           {advActive > 0 && (
-            <button onClick={() => setAdv(EMPTY_ADV)} className="btn btn-sm h-[30px] border-transparent">
+            <button
+              onClick={() => setAdv(EMPTY_ADV)}
+              className="btn btn-sm h-[30px] border-transparent"
+            >
               Reset
             </button>
           )}
           <span className="tnum ml-auto text-[12px] text-muted">
-            {filteredCount} of {summary?.total ?? 120} {view === "floor" && hasFilter ? "highlighted" : "shown"}
+            {filteredCount} of {summary?.total ?? 120}{" "}
+            {view === "floor" && hasFilter ? "highlighted" : "shown"}
           </span>
         </div>
 
         {advOpen && (
           <div className="panel mt-2 flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 text-[12.5px] text-ink-2">
             <label className="flex items-center gap-2">
-              <input type="checkbox" checked={adv.stuck} onChange={(e) => setAdv((a) => ({ ...a, stuck: e.target.checked }))} />
+              <input
+                type="checkbox"
+                checked={adv.stuck}
+                onChange={(e) =>
+                  setAdv((a) => ({ ...a, stuck: e.target.checked }))
+                }
+              />
               Stuck 20m+ only
             </label>
             <label className="flex items-center gap-1.5">
               On step
-              <input type="number" min={1} max={12} value={adv.step} onChange={(e) => setAdv((a) => ({ ...a, step: e.target.value }))} aria-label="On step" className="control h-7 w-16 text-[12px]" />
+              <input
+                type="number"
+                min={1}
+                max={12}
+                value={adv.step}
+                onChange={(e) =>
+                  setAdv((a) => ({ ...a, step: e.target.value }))
+                }
+                aria-label="On step"
+                className="control h-7 w-16 text-[12px]"
+              />
             </label>
             <label className="flex items-center gap-1.5">
               On step at least
-              <input type="number" min={0} value={adv.minStepMinutes} onChange={(e) => setAdv((a) => ({ ...a, minStepMinutes: e.target.value }))} aria-label="Minutes on current step" className="control h-7 w-16 text-[12px]" />
+              <input
+                type="number"
+                min={0}
+                value={adv.minStepMinutes}
+                onChange={(e) =>
+                  setAdv((a) => ({ ...a, minStepMinutes: e.target.value }))
+                }
+                aria-label="Minutes on current step"
+                className="control h-7 w-16 text-[12px]"
+              />
               min
             </label>
             <label className="flex items-center gap-1.5">
               Progress
-              <input type="number" min={0} max={100} value={adv.minProgressPct} onChange={(e) => setAdv((a) => ({ ...a, minProgressPct: e.target.value }))} aria-label="Minimum progress percent" className="control h-7 w-16 text-[12px]" />
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={adv.minProgressPct}
+                onChange={(e) =>
+                  setAdv((a) => ({ ...a, minProgressPct: e.target.value }))
+                }
+                aria-label="Minimum progress percent"
+                className="control h-7 w-16 text-[12px]"
+              />
               to
-              <input type="number" min={0} max={100} value={adv.maxProgressPct} onChange={(e) => setAdv((a) => ({ ...a, maxProgressPct: e.target.value }))} aria-label="Maximum progress percent" className="control h-7 w-16 text-[12px]" />
+              <input
+                type="number"
+                min={0}
+                max={100}
+                value={adv.maxProgressPct}
+                onChange={(e) =>
+                  setAdv((a) => ({ ...a, maxProgressPct: e.target.value }))
+                }
+                aria-label="Maximum progress percent"
+                className="control h-7 w-16 text-[12px]"
+              />
               %
             </label>
             <label className="flex items-center gap-1.5">
               Spend at least $
-              <input type="number" min={0} step="0.5" value={adv.minSpend} onChange={(e) => setAdv((a) => ({ ...a, minSpend: e.target.value }))} aria-label="Minimum spend" className="control h-7 w-20 text-[12px]" />
+              <input
+                type="number"
+                min={0}
+                step="0.5"
+                value={adv.minSpend}
+                onChange={(e) =>
+                  setAdv((a) => ({ ...a, minSpend: e.target.value }))
+                }
+                aria-label="Minimum spend"
+                className="control h-7 w-20 text-[12px]"
+              />
             </label>
           </div>
         )}
 
         {actionError && (
           <div role="alert" className="banner-error mt-3">
-            <span>{actionError.message} The action was not applied; polling only refreshes data.</span>
+            <span>
+              {actionError.message} The action was not applied; polling only
+              refreshes data.
+            </span>
             <span className="flex gap-2">
-              <button onClick={() => reprovision(actionError.id)} className="btn btn-sm btn-danger">
+              <button
+                onClick={() => reprovision(actionError.id)}
+                className="btn btn-sm btn-danger"
+              >
                 Retry reprovision
               </button>
-              <button onClick={() => setActionError(null)} className="btn btn-sm">
+              <button
+                onClick={() => setActionError(null)}
+                className="btn btn-sm"
+              >
                 Dismiss
               </button>
             </span>
@@ -732,25 +1108,40 @@ export default function Dashboard() {
         )}
         {fetchError && (
           <div role="alert" className="banner-error mt-3">
-            <span>{fetchError}{lastOkAt ? " Showing last good snapshot." : ""}</span>
+            <span>
+              {fetchError}
+              {lastOkAt ? " Showing last good snapshot." : ""}
+            </span>
             <button onClick={poll} className="btn btn-sm btn-danger">
               Retry now
             </button>
           </div>
         )}
 
-        <div className="seg mt-4 sm:hidden" role="tablist" aria-label="View (mobile)">
-          <button role="tab" aria-selected={view === "floor"} onClick={() => switchView("floor")}>
+        <div
+          className="seg mt-4 sm:hidden"
+          role="tablist"
+          aria-label="View (mobile)"
+        >
+          <button
+            role="tab"
+            aria-selected={view === "floor"}
+            onClick={() => switchView("floor")}
+          >
             Floor map
           </button>
-          <button role="tab" aria-selected={view === "table"} onClick={() => switchView("table")}>
+          <button
+            role="tab"
+            aria-selected={view === "table"}
+            onClick={() => switchView("table")}
+          >
             All learners
           </button>
         </div>
 
         <div className="mt-4">
           {view === "floor" ? (
-            <div className="grid grid-cols-1 gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
+            <div className="spatial-layout">
               <div className="flex min-w-0 flex-col gap-4">
                 <FloorMap
                   everyone={everyone}
@@ -775,17 +1166,70 @@ export default function Dashboard() {
                     </button>
                   </div>
                 )}
-                <StepFunnel
-                  everyone={everyone}
-                  activeStep={adv.step === "" ? null : Number(adv.step)}
-                  onSelectStep={(step) => setAdv((a) => ({ ...a, step: step === null ? "" : String(step) }))}
-                />
               </div>
-              <div className="flex min-w-0 flex-col gap-4">
-                <AttentionQueue everyone={everyone} selectedId={selectedId} onSelect={setSelectedId} onReprovision={reprovision} pending={pending} />
-                <TopSpenders everyone={everyone} onSelect={setSelectedId} />
-                <ActivityPulse transitions={transitions} onSelect={setSelectedId} />
+              <div className="experience-dock" aria-label="Workshop tools">
+                {(
+                  [
+                    ["attention", `Needs attention ${attention}`],
+                    ["activity", "Recent activity"],
+                    ["steps", "Lab steps"],
+                    ["spend", "Highest spend"],
+                  ] as const
+                ).map(([id, label]) => (
+                  <button
+                    key={id}
+                    className={
+                      id === "attention" && attention ? "dock-attention" : ""
+                    }
+                    aria-expanded={dock === id}
+                    onClick={() => setDock(dock === id ? null : id)}
+                  >
+                    {label}
+                    <span>{dock === id ? "−" : "+"}</span>
+                  </button>
+                ))}
+                <button
+                  className="copilot-launch"
+                  aria-expanded={agentOpen}
+                  onClick={() => setAgentOpen(!agentOpen)}
+                >
+                  ✳ Workshop copilot <span>↗</span>
+                </button>
               </div>
+              {dock && (
+                <div className="dock-content">
+                  {dock === "attention" && (
+                    <AttentionQueue
+                      everyone={everyone}
+                      selectedId={selectedId}
+                      onSelect={setSelectedId}
+                      onReprovision={reprovision}
+                      pending={pending}
+                    />
+                  )}
+                  {dock === "spend" && (
+                    <TopSpenders everyone={everyone} onSelect={setSelectedId} />
+                  )}
+                  {dock === "activity" && (
+                    <ActivityPulse
+                      transitions={transitions}
+                      onSelect={setSelectedId}
+                    />
+                  )}
+                  {dock === "steps" && (
+                    <StepFunnel
+                      everyone={everyone}
+                      activeStep={adv.step === "" ? null : Number(adv.step)}
+                      onSelectStep={(step) =>
+                        setAdv((a) => ({
+                          ...a,
+                          step: step === null ? "" : String(step),
+                        }))
+                      }
+                    />
+                  )}
+                </div>
+              )}
             </div>
           ) : (
             <div className="ops-scroll panel">
@@ -813,13 +1257,19 @@ export default function Dashboard() {
                     Array.from({ length: 14 }).map((_, i) => (
                       <tr key={`sk-${i}`}>
                         <td colSpan={6}>
-                          <div className="skeleton" style={{ width: `${55 + ((i * 37) % 40)}%` }} />
+                          <div
+                            className="skeleton"
+                            style={{ width: `${55 + ((i * 37) % 40)}%` }}
+                          />
                         </td>
                       </tr>
                     ))}
                   {!loading && !fetchError && rows.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="py-10 text-center text-[13px] text-ink-2">
+                      <td
+                        colSpan={6}
+                        className="py-10 text-center text-[13px] text-ink-2"
+                      >
                         No environments match these filters.
                         <button onClick={clearAll} className="btn btn-sm ml-2">
                           Clear all filters
@@ -856,12 +1306,21 @@ export default function Dashboard() {
                           </td>
                           <td>
                             <div className="flex min-w-0 items-baseline gap-2">
-                              <span className="truncate text-ink">{r.learnerName}</span>
-                              <span className="shrink-0 font-mono text-[11px] text-muted">{r.id}</span>
-                              <span className="seat-ref w-auto">· {seatOf(r.id)}</span>
+                              <span className="truncate text-ink">
+                                {r.learnerName}
+                              </span>
+                              <span className="shrink-0 font-mono text-[11px] text-muted">
+                                {r.id}
+                              </span>
+                              <span className="seat-ref w-auto">
+                                · {seatOf(r.id)}
+                              </span>
                             </div>
                             {r.state === "failed" && r.failureReason && (
-                              <div className="row-reason" title={r.failureReason}>
+                              <div
+                                className="row-reason"
+                                title={r.failureReason}
+                              >
                                 {r.failureReason}
                               </div>
                             )}
@@ -869,17 +1328,28 @@ export default function Dashboard() {
                           <td>
                             <div className="flex items-center gap-2.5">
                               <div className="meter">
-                                <div className="meter-fill" style={{ width: `${r.progressPct}%` }} />
+                                <div
+                                  className="meter-fill"
+                                  style={{ width: `${r.progressPct}%` }}
+                                />
                               </div>
                               <span className="tnum text-[12px] text-muted">
                                 {r.step}/{r.totalSteps}
                               </span>
                             </div>
                           </td>
-                          <td className={`tnum cell-num ${r.stuck ? "font-medium text-stuck" : "text-ink-2"}`}>
-                            {r.state === "in_use" || r.state === "failed" ? fmtMin(r.onStepMinutes) : <span className="dash">–</span>}
+                          <td
+                            className={`tnum cell-num ${r.stuck ? "font-medium text-stuck" : "text-ink-2"}`}
+                          >
+                            {r.state === "in_use" || r.state === "failed" ? (
+                              fmtMin(r.onStepMinutes)
+                            ) : (
+                              <span className="dash">–</span>
+                            )}
                           </td>
-                          <td className="tnum cell-num text-ink">{fmtUsd(r.spendUsd)}</td>
+                          <td className="tnum cell-num text-ink">
+                            {fmtUsd(r.spendUsd)}
+                          </td>
                           <td className="text-right">
                             {r.state === "failed" && (
                               <button
@@ -904,7 +1374,10 @@ export default function Dashboard() {
 
           <p className="mt-6 flex flex-wrap items-center gap-x-4 gap-y-1 text-[12px] text-muted">
             <span>
-              Updates every {POLL_MS / 1000}s{lastOkAt ? `, last at ${new Date(lastOkAt).toLocaleTimeString()}` : ""}
+              Updates every {POLL_MS / 1000}s
+              {lastOkAt
+                ? `, last at ${new Date(lastOkAt).toLocaleTimeString()}`
+                : ""}
             </span>
             <span className="flex items-center gap-1.5">
               <kbd className="kbd">/</kbd> filter
@@ -923,7 +1396,34 @@ export default function Dashboard() {
         </div>
       </main>
 
-      {selected && <PcPanel row={selected} pending={pending.has(selected.id)} onClose={() => setSelectedId(null)} onReprovision={reprovision} />}
+      {agentOpen ? (
+        <LabAgent
+          key={sessionId ?? "shared"}
+          sessionId={sessionId}
+          selectedId={selectedId}
+          onFilter={(filter, description)=>{setStateFilter([]);setSearch("");setAdv(EMPTY_ADV);cancelNL();setNlApplied({text:"Copilot room filter",description,source:"agent",degraded:false,filter});if(typeof filter.sort === "string")setSortBy(filter.sort);}}
+          onRefresh={(actions) => {
+              if (activeSession.current !== sessionId) return;
+            if (actions?.length) {
+              for (const a of actions)
+                pendingActions.current.set(`${a.id}:${a.at}`, a.id);
+              setPending((p) => new Set([...p, ...actions.map((a) => a.id)]));
+            }
+            void poll();
+          }}
+          onClose={() => setAgentOpen(false)}
+        />
+      ) : (
+        selected && (
+          <PcPanel
+            row={selected}
+            pending={pending.has(selected.id)}
+            onClose={() => setSelectedId(null)}
+            onReprovision={reprovision}
+            onAsk={() => setAgentOpen(true)}
+          />
+        )
+      )}
     </div>
   );
 }
@@ -949,7 +1449,11 @@ function Stat({
       <div className="flex items-end justify-between gap-3">
         <div className={`stat-value ${valueClass ?? "text-ink"}`}>
           {value}
-          {suffix && <span className="text-[14px] font-normal tracking-normal text-muted">{suffix}</span>}
+          {suffix && (
+            <span className="text-[14px] font-normal tracking-normal text-muted">
+              {suffix}
+            </span>
+          )}
         </div>
         {trend && <div className="pb-1">{trend}</div>}
       </div>
@@ -958,7 +1462,19 @@ function Stat({
   );
 }
 
-function PcPanel({ row, pending, onClose, onReprovision }: { row: EnvRow; pending: boolean; onClose: () => void; onReprovision: (id: string) => void }) {
+function PcPanel({
+  row,
+  pending,
+  onClose,
+  onReprovision,
+  onAsk,
+}: {
+  row: EnvRow;
+  pending: boolean;
+  onClose: () => void;
+  onReprovision: (id: string) => void;
+  onAsk: () => void;
+}) {
   const st = seatStatus(row);
   const active = row.state === "in_use" || row.state === "failed";
   const stepState = (i: number): "done" | "current" | "todo" => {
@@ -970,16 +1486,31 @@ function PcPanel({ row, pending, onClose, onReprovision }: { row: EnvRow; pendin
   };
 
   return (
-    <section className="drawer" data-st={st} aria-label={`Details for ${row.learnerName}`}>
+    <section
+      className="drawer"
+      data-st={st}
+      aria-label={`Details for ${row.learnerName}`}
+    >
       <div className="flex items-start gap-3 border-b border-line px-5 py-4">
         <div className="min-w-0 flex-1">
+          <div className="text-[10px] tracking-[.12em] text-muted mb-3">
+            PC CONTROL CENTER · SIMULATION
+          </div>
           <div className="text-[12px] text-muted">
             Seat {seatOf(row.id)} · <span className="font-mono">{row.id}</span>
           </div>
-          <div className="mt-0.5 truncate text-[17px] font-semibold tracking-[-0.01em] text-ink">{row.learnerName}</div>
-          <div className="truncate text-[12.5px] text-muted">{row.learnerEmail}</div>
+          <div className="mt-0.5 truncate text-[17px] font-semibold tracking-[-0.01em] text-ink">
+            {row.learnerName}
+          </div>
+          <div className="truncate text-[12.5px] text-muted">
+            {row.learnerEmail}
+          </div>
         </div>
-        <button className="icon-btn -mr-1.5" onClick={onClose} aria-label="Close details">
+        <button
+          className="icon-btn -mr-1.5"
+          onClick={onClose}
+          aria-label="Close details"
+        >
           <Icon.X />
         </button>
       </div>
@@ -990,19 +1521,49 @@ function PcPanel({ row, pending, onClose, onReprovision }: { row: EnvRow; pendin
 
         {row.state === "failed" && (
           <div className="mt-4 rounded-md border border-line p-3">
-            <div className="text-[13px] font-medium text-failed">{row.failureReason ?? "Environment failed"}</div>
-            <p className="mt-1 text-[12.5px] text-muted">Reprovisioning gives the learner a fresh PC, starting again from step 1. Billing continues.</p>
-            <button onClick={() => onReprovision(row.id)} disabled={pending} className="btn btn-danger-solid mt-3 w-full">
+            <div className="text-[13px] font-medium text-failed">
+              {row.failureReason ?? "Environment failed"}
+            </div>
+            <p className="mt-1 text-[12.5px] text-muted">
+              Reprovisioning gives the learner a fresh PC, starting again from
+              step 1. Billing continues.
+            </p>
+            <button
+              onClick={() => onReprovision(row.id)}
+              disabled={pending}
+              className="btn btn-danger-solid mt-3 w-full"
+            >
               {pending ? "Reprovisioning…" : "Reprovision environment"}
             </button>
           </div>
         )}
         {row.stuck && (
           <div className="note-warn mt-4">
-            On this step for {fmtMin(row.onStepMinutes)}. Steps usually take 3 to 8 minutes, so a quick check-in may help.
+            On this step for {fmtMin(row.onStepMinutes)}. Steps usually take 3
+            to 8 minutes, so a quick check-in may help.
           </div>
         )}
 
+        <div className="mt-4 rounded-md border border-line p-3">
+          <div className="text-[11px] text-muted">
+            CURRENT SIMULATED ACTIVITY
+          </div>
+          <div className="mt-1 text-[13px] text-ink">
+            {row.state === "deprovisioned"
+              ? "Lab complete. Resources released."
+              : row.state === "failed"
+                ? `Stopped at step ${row.step}: ${LAB_STEPS[Math.max(0, row.step - 1)] ?? "Not started"}`
+                : row.state === "in_use"
+                  ? `Step ${row.step}: ${LAB_STEPS[Math.max(0, row.step - 1)] ?? "Not started"}`
+                  : STATE_META[st].plain}
+          </div>
+          <div className="mt-2 text-[11px] text-muted">
+            {row.progressPct}% complete · {fmtMin(row.onStepMinutes)} on step
+          </div>
+        </div>
+        <button className="btn mt-4 w-full" onClick={onAsk}>
+          ✳ Ask copilot about this PC
+        </button>
         <dl className="mt-5 grid grid-cols-3 border-y border-line py-3">
           {[
             ["Spent", fmtUsd(row.spendUsd)],
@@ -1011,34 +1572,44 @@ function PcPanel({ row, pending, onClose, onReprovision }: { row: EnvRow; pendin
           ].map(([k, v]) => (
             <div key={k}>
               <dt className="text-[12px] text-muted">{k}</dt>
-              <dd className="tnum mt-0.5 text-[15px] font-medium text-ink">{v}</dd>
+              <dd className="tnum mt-0.5 text-[15px] font-medium text-ink">
+                {v}
+              </dd>
             </div>
           ))}
         </dl>
 
-        <div className="mt-5 flex items-baseline justify-between">
-          <h2 className="text-[13px] font-semibold text-ink">Lab steps</h2>
-          <span className="tnum text-[12px] text-muted">{row.progressPct}% complete</span>
-        </div>
-        <ol className="mt-2" aria-label="Lab steps">
-          {LAB_STEPS.slice(0, row.totalSteps).map((name, i) => {
-            const s = stepState(i);
-            return (
-              <li key={i} className="step" data-state={s}>
-                <span className="step-n">{s === "done" ? "✓" : i + 1}</span>
-                <span className="min-w-0 flex-1">
-                  {name}
-                  {s === "current" && (
-                    <span className={`ml-1.5 text-[12px] font-normal ${row.stuck ? "text-stuck" : row.state === "failed" ? "text-failed" : "text-muted"}`}>
-                      {row.state === "failed" ? "failed here" : `${fmtMin(row.onStepMinutes)} so far`}
-                    </span>
-                  )}
-                </span>
-              </li>
-            );
-          })}
-        </ol>
+        <details className="inspector-steps mt-5">
+          <summary className="flex items-baseline justify-between">
+            <h2 className="text-[13px] font-semibold text-ink">Lab steps</h2>
+            <span className="tnum text-[12px] text-muted">
+              {row.progressPct}% complete · Expand/collapse
+            </span>
+          </summary>
+          <ol className="mt-2" aria-label="Lab steps">
+            {LAB_STEPS.slice(0, row.totalSteps).map((name, i) => {
+              const s = stepState(i);
+              return (
+                <li key={i} className="step" data-state={s}>
+                  <span className="step-n">{s === "done" ? "✓" : i + 1}</span>
+                  <span className="min-w-0 flex-1">
+                    {name}
+                    {s === "current" && (
+                      <span
+                        className={`ml-1.5 text-[12px] font-normal ${row.stuck ? "text-stuck" : row.state === "failed" ? "text-failed" : "text-muted"}`}
+                      >
+                        {row.state === "failed"
+                          ? "failed here"
+                          : `${fmtMin(row.onStepMinutes)} so far`}
+                      </span>
+                    )}
+                  </span>
+                </li>
+              );
+            })}
+          </ol>
+        </details>
       </div>
     </section>
   );
-}
+        }
