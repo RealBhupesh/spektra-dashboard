@@ -463,117 +463,44 @@
   .stackbar > span:first-child { border-radius: 2px 0 0 2px; }
   .stackbar > span:last-child { border-radius: 0 2px 2px 0; }
 
-  /* ---------- Seat map ---------- */
+  /* ---------- Isometric lab ---------- */
   .floor {
     padding: 8px 16px 20px;
     overflow-x: auto;
   }
   .floor-inner {
-    --seat: 34px;
-    --gap: 6px;
-    --aisle: 28px;
     position: relative;
-    width: max-content;
+    min-width: 720px;
+    width: 100%;
     margin: 0 auto;
+    touch-action: pan-x pan-y;
   }
-  @media (min-width: 1280px) {
-    .floor-inner {
-      --seat: 40px;
-      --gap: 7px;
-      --aisle: 40px;
-    }
-  }
-  @media (max-width: 640px) {
-    .floor-inner {
-      --seat: 22px;
-      --gap: 4px;
-      --aisle: 12px;
-    }
-  }
-  .screen {
-    margin: 6px auto 26px;
-    width: 70%;
-    text-align: center;
-  }
-  .screen-curve {
+  .floor-inner[data-zoomed="true"] { touch-action: none; cursor: grab; }
+  .floor-inner[data-zoomed="true"]:active { cursor: grabbing; }
+  .floor-inner .pc { cursor: pointer; }
+  .iso {
     display: block;
     width: 100%;
-    height: 12px;
-    border-top: 2px solid var(--line-strong);
-    border-radius: 50% / 100% 100% 0 0;
+    height: auto;
+    overflow: hidden;
   }
-  .screen-label {
-    font-size: 11px;
-    color: var(--muted);
-  }
-  .seat-row {
-    display: flex;
-    align-items: center;
-    gap: var(--gap);
-    margin-bottom: var(--gap);
-  }
-  .row-label {
-    width: 16px;
-    flex: none;
-    text-align: center;
-    font-size: 11px;
-    font-weight: 500;
-    color: var(--muted);
-  }
-  .aisle {
-    width: var(--aisle);
-    flex: none;
-  }
-  .seat {
-    --fill: var(--surface);
-    --edge: var(--line-2);
-    --txt: var(--muted);
-    position: relative;
-    flex: none;
-    display: grid;
-    place-items: center;
-    width: var(--seat);
-    height: var(--seat);
-    font-size: 10.5px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    color: var(--txt);
-    background: var(--fill);
-    border: 1.5px solid var(--edge);
-    border-radius: 7px 7px 3px 3px; /* a seat back, not a tile */
-  }
-  @media (max-width: 640px) {
-    .seat { font-size: 0; border-radius: 5px 5px 2px 2px; }
-  }
-  .seat[data-mode="status"][data-st="in_use"] { --fill: var(--active); --edge: var(--active); --txt: var(--seat-on-text); }
-  .seat[data-mode="status"][data-st="failed"] { --fill: var(--failed); --edge: var(--failed); --txt: var(--seat-failure-text); }
-  .seat[data-mode="status"][data-st="stuck"] { --fill: var(--stuck); --edge: var(--stuck); --txt: #1d1300; }
-  .seat[data-mode="status"][data-st="ready"] { --edge: var(--ready); --txt: var(--ready-ink); }
-  .seat[data-mode="status"][data-st="provisioning"] { --edge: var(--booting); --txt: var(--booting-ink); border-style: dashed; }
-  .seat[data-mode="status"][data-st="deprovisioned"] { --fill: var(--off); --edge: var(--off); --txt: var(--ink-2); }
-  .seat:is([data-mode="spend"], [data-mode="progress"]) {
-    --fill: var(--ramp-fill);
-    --txt: var(--ramp-text);
-  }
-  .seat:hover {
-    border-color: var(--ink);
-  }
-  .seat[data-selected="true"] {
-    outline: 2px solid var(--ink);
-    outline-offset: 2px;
-  }
-  .seat[data-mode][data-dim="true"] {
-    --fill: var(--surface-3);
-    --edge: var(--line-2);
-    --txt: var(--muted);
-  }
-  .seat.skeleton {
-    border-color: var(--line);
-    background: var(--surface-3);
-  }
-  .seat-flash {
-    animation: seatflash 1s ease-out 1;
-  }
+  .pc-line { stroke: var(--ink); stroke-width: 1.2; stroke-linejoin: round; }
+  .pc-bezel { stroke: var(--ink); stroke-width: 1.2; }
+  .pc-bench { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1; stroke-linejoin: round; }
+  .pc-cable { stroke: var(--line-strong); stroke-width: 0.8; }
+  .pc-thin { stroke-width: 0.9; }
+  .pc-edge { stroke: var(--line-2); stroke-width: 0.8; }
+  .pc-key { stroke: var(--ink-2); stroke-width: 0.55; }
+  .pc-note { font: 500 10px var(--font-mono); fill: var(--muted); }
+  .pc-row { font: 600 12px var(--font-mono); fill: var(--ink-2); }
+  .pc { cursor: pointer; outline: none; }
+  .pc:hover .pc-bezel { stroke-width: 2.4; }
+  .pc:focus-visible .pc-bezel { stroke: var(--focus); stroke-width: 3; }
+  .pc[data-selected="true"] .pc-bezel { stroke-width: 3.2; }
+  .pc[data-selected="true"] { filter: drop-shadow(0 0 0 transparent); }
+  .pc[data-dim="true"] { opacity: 0.22; }
+  .pc-skel { opacity: 0.5; }
+  .pc-flash .pc-bezel { animation: pcflash 1s ease-out 1; }
 
   .seat-tip {
     position: absolute;
@@ -585,16 +512,6 @@
     border: 1px solid var(--line-2);
     border-radius: 8px;
     box-shadow: 0 6px 20px rgb(0 0 0 / 0.08);
-  }
-
-  .legend-swatch {
-    display: inline-block;
-    flex: none;
-    width: 12px;
-    height: 12px;
-    border-radius: 3px 3px 1px 1px;
-    border: 1.5px solid var(--edge, var(--line-2));
-    background: var(--fill, var(--surface));
   }
 
   /* Rows in side panels */
@@ -819,9 +736,9 @@
 }
 tr[data-st="failed"].row-flash { --flash-from: color-mix(in srgb, var(--failed) 14%, transparent); }
 tr[data-st="stuck"].row-flash { --flash-from: color-mix(in srgb, var(--stuck) 18%, transparent); }
-@keyframes seatflash {
-  0% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--st) 35%, transparent); }
-  100% { box-shadow: 0 0 0 0 transparent; }
+@keyframes pcflash {
+  0% { stroke: var(--focus); stroke-width: 4; }
+  100% { stroke: var(--ink); stroke-width: 1.2; }
 }
 
 @media (prefers-reduced-motion: reduce) {
