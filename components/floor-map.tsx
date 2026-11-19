@@ -841,4 +841,4 @@ export function FloorMap(props: Props) {
       )}
     </section>
   );
-                   }
+}
