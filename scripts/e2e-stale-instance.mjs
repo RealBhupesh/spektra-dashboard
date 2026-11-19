@@ -27,7 +27,7 @@ const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 await page.goto(`${BASE}/?view=table`, { waitUntil: "domcontentloaded" });
-await page.getByRole("button", { name: "Start isolated demo" }).click();
+await page.getByRole("button", { name: "Start fresh demo" }).click();
 await page.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
 await page.waitForFunction(() => document.querySelectorAll("tbody tr[data-env-id]").length === 120);
 

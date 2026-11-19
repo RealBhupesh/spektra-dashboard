@@ -1,6 +1,6 @@
 # CloudLabs Workshop Operations Dashboard
 
-An instructor dashboard for a simulated Azure workshop with 120 learners. The interactive 3D floor shows 120 stable workstations, and the risk-sorted table makes failures and stalled learners quick to scan. Color distinguishes status, while the Spend and Progress maps use neutral tones.
+An instructor dashboard for a simulated Azure workshop with 120 learners. The 2D and 3D floor maps show the same 120 stable workstations, and the risk-sorted table makes failures and stalled learners quick to scan. Color distinguishes status, while the Spend and Progress maps use neutral tones.
 
 ## Run locally
 
@@ -15,14 +15,14 @@ Open http://localhost:3000. For a production build, run `npm run build` and `npm
 
 ## Use the dashboard
 
-- The **Floor map** shows the full room. Hover or focus a seat for a summary, or open it for step-by-step progress, spend, and reprovisioning. Filters highlight matching seats in place. Search accepts a learner name or seat such as `B7`.
+- The **Floor map** shows the full room. Switch between the top-down 2D map and the 3D room independently of **Status**, **Spend**, or **Progress** coloring. Filters dim seats outside the current results, and those seats remain selectable. Search accepts a learner name or seat such as `B7`.
 - **All learners** opens the dense table. Status buttons, search, sort, and **More filters** also work when the optional model is unavailable.
 - The summary reports active PCs, failures, estimated spend, and average progress. The app polls every four seconds and replays simulated state changes and billing on the server.
 - `/` focuses the plain-English filter, arrows move between seats or table rows, `r` reprovisions a focused failed environment, and `Esc` closes the details panel.
 
-**Start isolated demo** opens a freshly seeded cohort. Actions apply to that demo, and reloading the tab keeps the same demo. **Start new demo** selects a fresh cohort. **Return to shared** restores the original shared session. An isolated demo expires after 24 hours. The API rejects expired sessions and the dashboard offers a fresh demo or the shared session. Expired records remain in their storage namespace.
+**Start fresh demo** opens a freshly seeded, isolated cohort. **Start guided demo** opens a new isolated cohort and offers a short walkthrough of the existing simulated reprovision action. The guide reports the simulator’s observed state and can be closed at any time. Both buttons require a click. Reloading the tab restores the isolated session. **Return to shared** opens the original shared workshop. Isolated changes stay in their own session. Isolated sessions expire after 24 hours and their records remain in their storage namespace.
 
-Local persistence stores the simulation start time and reprovision actions under `.data/`. Set `WORKSHOP_DATA_DIR` to point a local server at a separate data directory. Deployments configured with the existing private Vercel Blob storage path can use the same persistence interface. See [DECISIONS.md](DECISIONS.md).
+Production stores the session start time and append-only reprovision actions in Neon Postgres. The app selects configured SQL first, then optional legacy private Vercel Blob, then local files. Local files default to `.data/`, with `WORKSHOP_DATA_DIR` available to override the directory. See [DECISIONS.md](DECISIONS.md).
 
 ## Plain-English filters
 
@@ -34,14 +34,13 @@ The route validates the full response and checks recognizable constraints in the
 
 ## Verification and evidence
 
-See [VERIFICATION.md](VERIFICATION.md) for the exact commands, results, and screenshot checklist. The `shot-*` files and `recordings/demo-75s.mp4` are legacy captures; `final-*` and `hosted-*` are current evidence. `scripts/shoot-stills.mjs` captures the current dashboard into `screenshots/final-*.png` and checks the full 120-row or 120-seat load before taking the dense captures.
+See [VERIFICATION.md](VERIFICATION.md) for the exact commands, results, and screenshot checklist. The screenshots and recording capture earlier dashboard versions. `scripts/shoot-stills.mjs` captures the current dashboard into `screenshots/final-*.png` and checks the full 120-row or 120-seat load before taking the dense captures.
 
 ## AI-use disclosure
 
-An AI coding assistant generated the initial source, tests, and documentation on 2026-11-17. On 2026-11-18, a design review by Claude (Opus 5.5) flagged noisy healthy rows, inconsistent color tokens, a missing sticky table header, weak input boundaries, and decorative skeleton motion. The project dropped the generic gradient cards and chart, decorative motion, and client-side mock data. The later Claude-assisted redesign introduced the cinema-style floor map and PC details panel.
+An AI coding assistant generated substantial portions of the source code, tests, and documentation under the project author’s direction. The author rejected generic dashboard and template treatments and directed the design toward illustrated PCs and a navigable workshop lab.
 
-An earlier read-only Codex review inspected polling, aggregates, simulation billing, filter semantics, keyboard targeting, and model configuration. This completion pass used personal Codex with `gpt-6.2-sol` at `ultra` reasoning (a final documentation wrap used `high`) to harden filter compilation and model validation, fix a stale-response race, strengthen snapshot and demo isolation, revise contrast, and extend verification. Executed checks and remaining gaps are listed in [VERIFICATION.md](VERIFICATION.md).
-
+Personal Codex implemented the top-down 2D map, explicit fresh-demo entry, guided demo, and loading states, along with regression tests.
 
 ## Spatial workshop and copilot
 

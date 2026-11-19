@@ -10,7 +10,7 @@ const browser = await chromium.launch();
 const open = async (viewport, scheme = "light") => {
   const page = await browser.newPage({ viewport, colorScheme: scheme });
   await page.goto(BASE, { waitUntil: "domcontentloaded" });
-  await page.getByRole("button", { name: "Start isolated demo" }).click();
+  await page.getByRole("button", { name: "Start fresh demo" }).click();
   await page.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
   await page.waitForFunction(() => document.querySelectorAll(".pc[data-env-id]").length === 120, null, { timeout: 40000 });
   await page.mouse.move(2, 2);

@@ -10,7 +10,7 @@ import {
 } from "react";
 import { LAB_STEPS } from "@/lib/seed";
 import { LabAgent } from "./lab-agent";
-import { FloorMap, type ColorMode } from "./floor-map";
+import { FloorMap, type ColorMode, type Projection } from "./floor-map";
 import {
   ActivityPulse,
   AttentionQueue,
@@ -32,6 +32,7 @@ import {
   fmtMin,
   fmtUsd,
   idOfSeat,
+  seatIndex,
   seatOf,
   seatStatus,
 } from "./ui";
@@ -72,7 +73,9 @@ export default function Dashboard() {
   >([]);
   const [, setTick] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>();
-  const [sessionPending, setSessionPending] = useState(false);
+  const [sessionPending, setSessionPending] = useState<"fresh" | "guided" | null>(null);
+  const creatingSession = useRef(false);
+  const [guide, setGuide] = useState<{ targetId?: string | null; confirmed?: boolean } | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const activeSession = useRef<string | null | undefined>(undefined);
   const sessionGeneration = useRef(0);
@@ -82,6 +85,7 @@ export default function Dashboard() {
   const [dock, setDock] = useState<
     "attention" | "steps" | "spend" | "activity" | null
   >(null);
+  const [projection, setProjection] = useState<Projection>("3D");
   const [mode, setMode] = useState<ColorMode>("status");
   const [theme, setTheme] = useState<"light" | "dark">("light");
 
@@ -379,6 +383,7 @@ export default function Dashboard() {
     prevStates.current.clear();
     pendingActions.current.clear();
     setSessionId(id);
+    setGuide(null);
     setSessionError(null);
     setSummary(null);
     setRows([]);
@@ -395,30 +400,54 @@ export default function Dashboard() {
     setActionError(null);
   };
 
-  const startDemo = async () => {
-    setSessionPending(true);
+  const startDemo = async (kind: "fresh" | "guided") => {
+    if (creatingSession.current || activeSession.current === undefined) return;
+    creatingSession.current = true;
+    setSessionPending(kind);
     setSessionError(null);
     try {
       const res = await fetch("/api/session", { method: "POST" });
+      if (res.status === 429) {
+        setSessionError("Too many demo starts. Wait a moment before trying again.");
+        return;
+      }
       if (!res.ok) throw new Error(`server ${res.status}`);
       const { id } = await res.json();
       if (typeof id !== "string" || !id)
         throw new Error("missing demo session id");
       selectSession(id);
+      if (kind === "guided") {
+        setAgentOpen(false);
+        setGuide({});
+      }
     } catch {
       setSessionError(
         "Could not start an isolated demo. Try again in a moment.",
       );
     } finally {
-      setSessionPending(false);
+      creatingSession.current = false;
+      setSessionPending(null);
     }
   };
 
+  useEffect(() => {
+    if (!sessionId || !guide || guide.targetId !== undefined || loading || fetchError) return;
+    const failed = everyone
+      .filter((row) => row.state === "failed")
+      .sort((a, b) => seatIndex(a.id) - seatIndex(b.id))[0];
+    setGuide({ targetId: failed?.id ?? null });
+    if (failed) setSelectedId(failed.id);
+  }, [everyone, fetchError, guide, loading, sessionId]);
+
   const reprovision = useCallback(
     async (id: string) => {
+      if (sessionId === undefined || sessionId !== activeSession.current) return;
       const generation = sessionGeneration.current;
       setPending((p) => new Set(p).add(id));
       setActionError(null);
+      setGuide((current) => current?.targetId === id
+        ? { ...current, confirmed: false }
+        : current);
       try {
         const res = await fetch(`/api/environments/${id}/reprovision`, {
           method: "POST",
@@ -434,6 +463,11 @@ export default function Dashboard() {
             ? (body.action as { id: string; at: number })
             : null;
         if (confirmed && generation === sessionGeneration.current) {
+          if (sessionId && confirmed.id === id) {
+            setGuide((current) => current?.targetId === id
+              ? { ...current, confirmed: true }
+              : current);
+          }
           // Hold the pending state until a poll from ANY instance INCLUDES
           // this exact append; a stale instance's snapshot is discarded by
           // the inclusion check in poll() instead of rolling the row back.
@@ -447,7 +481,7 @@ export default function Dashboard() {
         if (generation === sessionGeneration.current) {
           setActionError({
             id,
-            message: `Reprovision of ${id} (seat ${seatOf(id)}) failed.`,
+            message: `Reprovision for seat ${seatOf(id)} (${id}) could not be confirmed.`,
           });
         }
       } finally {
@@ -623,6 +657,50 @@ export default function Dashboard() {
     everyone.find((r) => r.id === selectedId) ??
     rows.find((r) => r.id === selectedId) ??
     null;
+  const guideRow = guide?.targetId ? everyone.find((row) => row.id === guide.targetId) : undefined;
+  let guideMessage = "Loading the isolated workshop…";
+  if (guide) {
+    if (fetchError) {
+      guideMessage = "Waiting for workshop data to reconnect. Any displayed PC state is from the last snapshot.";
+    } else if (guide.targetId === null || (guide.targetId && !guideRow)) {
+      guideMessage = "No failed PC is available for this walkthrough.";
+    } else if (guideRow) {
+      const seat = seatOf(guideRow.id);
+      if (actionError?.id === guideRow.id) {
+        guideMessage = `Reprovision for seat ${seat} could not be confirmed. Check the live state before trying again.`;
+      } else if (pending.has(guideRow.id)) {
+        guideMessage = guide.confirmed
+          ? `Reprovision accepted for seat ${seat}. Waiting for a snapshot that includes the action.`
+          : `Requesting simulated reprovision for seat ${seat}…`;
+      } else if (guideRow.state === "failed") {
+        guideMessage = `${guide.confirmed ? "The simulated PC failed again." : `Seat ${seat} failed${guideRow.step ? ` at step ${guideRow.step}` : " during provisioning"}.`} ${guideRow.failureReason ?? "The environment reported a failure."} Use Reprovision environment to start a fresh simulated PC.`;
+      } else if (guide.confirmed && guideRow.state === "provisioning") {
+        guideMessage = `Seat ${seat} is provisioning. The simulator can report Ready or a new failure on a later refresh.`;
+      } else if (guide.confirmed && guideRow.state === "ready") {
+        guideMessage = `Seat ${seat} is Ready for the learner.`;
+      } else {
+        guideMessage = `Seat ${seat} is now ${STATE_META[seatStatus(guideRow)].label}. ${STATE_META[seatStatus(guideRow)].plain}`;
+      }
+    }
+  }
+  const guidePanel = guide && (
+    <section aria-label="Guided demo" className="demo-banner panel">
+      <div className="min-w-0">
+        <h2 className="font-semibold text-ink">Guided demo</h2>
+        <p role="status">{guideMessage}</p>
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {guideRow && (selectedId !== guideRow.id || agentOpen) && (
+          <button className="btn btn-sm" onClick={() => {
+            setAgentOpen(false);
+            setSelectedId(guideRow.id);
+          }}>Inspect seat {seatOf(guideRow.id)}</button>
+        )}
+        <button className="btn btn-sm" onClick={() => setGuide(null)}>Close guide</button>
+      </div>
+    </section>
+  );
+  const guideInDrawer = Boolean(guideRow && selected?.id === guideRow.id && !agentOpen);
   const elapsed = summary
     ? fmtClock(Date.now() - summary.sessionStartedAt)
     : "–";
@@ -669,7 +747,7 @@ export default function Dashboard() {
               aria-live="polite"
             >
               <span aria-hidden className="live-dot" />
-              {fetchError ? "Reconnecting" : "Live"}
+              {fetchError ? "Reconnecting" : loading ? "Loading" : "Live"}
             </span>
             <span className="tnum hidden text-[12px] text-muted md:inline">
               {elapsed} elapsed
@@ -703,36 +781,44 @@ export default function Dashboard() {
             <div className="text-[12.5px] text-muted">
               {sessionId
                 ? "Isolated demo · Simulated data"
-                : "Simulated workshop"}
+                : sessionId === null ? "Shared workshop · Simulated data" : "Simulated workshop"}
             </div>
             <div className="mt-0.5 text-[20px] font-semibold tracking-[-0.015em] text-ink">
-              {summary?.sessionName ??
-                (fetchError ? "Workshop dashboard" : "Loading session…")}
+              {loading ? (
+                <>
+                  <span className="sr-only">Loading workshop title</span>
+                  <span className="skeleton workshop-title-skeleton" aria-hidden="true" />
+                </>
+              ) : summary?.sessionName ?? "Workshop dashboard"}
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
             {sessionId && (
               <button
                 onClick={() => selectSession(null)}
-                disabled={sessionPending}
+                disabled={sessionPending !== null}
                 className="btn btn-sm"
               >
                 Return to shared
               </button>
             )}
-            <button
-              onClick={startDemo}
-              disabled={sessionId === undefined || sessionPending}
-              className="btn btn-sm"
-            >
-              {sessionPending
-                ? "Starting demo…"
-                : sessionId
-                  ? "Start new demo"
-                  : "Start isolated demo"}
-            </button>
           </div>
         </div>
+        <section className="demo-banner panel mb-4" aria-label="Workshop sessions">
+          <div className="min-w-0">
+            <h2 className="font-semibold text-ink">{sessionId ? "Your isolated workshop" : "Try an active workshop"}</h2>
+            <p>Start with a fresh cohort of simulated learners. Changes in an isolated demo do not affect the shared workshop.</p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button onClick={() => startDemo("fresh")} disabled={sessionId === undefined || sessionPending !== null} className="btn btn-primary">
+              {sessionPending === "fresh" ? "Starting demo…" : "Start fresh demo"}
+            </button>
+            <button onClick={() => startDemo("guided")} disabled={sessionId === undefined || sessionPending !== null} className="btn">
+              {sessionPending === "guided" ? "Starting guide…" : "Start guided demo"}
+            </button>
+          </div>
+        </section>
+        {!guideInDrawer && guidePanel}
         {sessionError && (
           <p role="alert" className="note-warn mb-3">
             {sessionError}
@@ -740,9 +826,10 @@ export default function Dashboard() {
         )}
 
         {/* Stats */}
-        <div className="command-band panel stats">
+        <div className="command-band panel stats" aria-busy={loading} aria-label="Workshop metrics">
           <Stat
             label="PCs switched on"
+            loading={loading}
             value={summary ? `${summary.active}` : "–"}
             suffix={summary ? ` of ${summary.total}` : undefined}
             sub={
@@ -777,6 +864,7 @@ export default function Dashboard() {
           />
           <Stat
             label="Need help"
+            loading={loading}
             value={summary ? String(attention) : "–"}
             valueClass={attention > 0 ? "text-failed" : undefined}
             trend={
@@ -796,6 +884,7 @@ export default function Dashboard() {
           />
           <Stat
             label="Average progress"
+            loading={loading}
             value={summary ? `${summary.avgCompletionPct}%` : "–"}
             sub={
               summary ? (
@@ -819,6 +908,7 @@ export default function Dashboard() {
           />
           <Stat
             label="Spent so far"
+            loading={loading}
             value={summary ? fmtUsd(summary.estimatedSpend) : "–"}
             trend={
               <Sparkline values={history.map((h) => h.spend)} label="Spend" />
@@ -995,8 +1085,9 @@ export default function Dashboard() {
             </button>
           )}
           <span className="tnum ml-auto text-[12px] text-muted">
-            {filteredCount} of {summary?.total ?? 120}{" "}
-            {view === "floor" && hasFilter ? "highlighted" : "shown"}
+            {summary
+              ? `${filteredCount} of ${summary.total} ${view === "floor" && hasFilter ? "highlighted" : "shown"}`
+              : loading ? "Loading learners…" : "Learner count unavailable"}
           </span>
         </div>
 
@@ -1087,8 +1178,7 @@ export default function Dashboard() {
         {actionError && (
           <div role="alert" className="banner-error mt-3">
             <span>
-              {actionError.message} The action was not applied; polling only
-              refreshes data.
+              {actionError.message} Check the PC state before retrying.
             </span>
             <span className="flex gap-2">
               <button
@@ -1147,6 +1237,8 @@ export default function Dashboard() {
                   everyone={everyone}
                   matched={matched}
                   mode={mode}
+                  projection={projection}
+                  onProjectionChange={setProjection}
                   onModeChange={setMode}
                   selectedId={selectedId}
                   onSelect={setSelectedId}
@@ -1170,7 +1262,7 @@ export default function Dashboard() {
               <div className="experience-dock" aria-label="Workshop tools">
                 {(
                   [
-                    ["attention", `Needs attention ${attention}`],
+                    ["attention", summary ? `Needs attention ${attention}` : "Needs attention"],
                     ["activity", "Recent activity"],
                     ["steps", "Lab steps"],
                     ["spend", "Highest spend"],
@@ -1418,6 +1510,7 @@ export default function Dashboard() {
           <PcPanel
             row={selected}
             pending={pending.has(selected.id)}
+            guide={guideInDrawer ? guidePanel : null}
             onClose={() => setSelectedId(null)}
             onReprovision={reprovision}
             onAsk={() => setAgentOpen(true)}
@@ -1432,6 +1525,7 @@ function Stat({
   label,
   value,
   suffix,
+  loading,
   valueClass,
   trend,
   sub,
@@ -1439,6 +1533,7 @@ function Stat({
   label: string;
   value: string;
   suffix?: string;
+  loading: boolean;
   valueClass?: string;
   trend?: ReactNode;
   sub?: ReactNode;
@@ -1446,18 +1541,27 @@ function Stat({
   return (
     <section className="stat" aria-label={label}>
       <div className="stat-label">{label}</div>
-      <div className="flex items-end justify-between gap-3">
-        <div className={`stat-value ${valueClass ?? "text-ink"}`}>
-          {value}
-          {suffix && (
-            <span className="text-[14px] font-normal tracking-normal text-muted">
-              {suffix}
-            </span>
-          )}
+      {loading ? (
+        <div aria-hidden="true">
+          <div className="skeleton stat-value-skeleton" />
+          <div className="skeleton stat-sub-skeleton" />
         </div>
-        {trend && <div className="pb-1">{trend}</div>}
-      </div>
-      {sub}
+      ) : (
+        <>
+          <div className="flex items-end justify-between gap-3">
+            <div className={`stat-value ${valueClass ?? "text-ink"}`}>
+              {value}
+              {suffix && (
+                <span className="text-[14px] font-normal tracking-normal text-muted">
+                  {suffix}
+                </span>
+              )}
+            </div>
+            {trend && <div className="pb-1">{trend}</div>}
+          </div>
+          {sub}
+        </>
+      )}
     </section>
   );
 }
@@ -1465,12 +1569,14 @@ function Stat({
 function PcPanel({
   row,
   pending,
+  guide,
   onClose,
   onReprovision,
   onAsk,
 }: {
   row: EnvRow;
   pending: boolean;
+  guide?: ReactNode;
   onClose: () => void;
   onReprovision: (id: string) => void;
   onAsk: () => void;
@@ -1516,6 +1622,7 @@ function PcPanel({
       </div>
 
       <div className="flex-1 overflow-y-auto px-5 py-4">
+        {guide && <div className="mb-4">{guide}</div>}
         <StatusChip state={row.state} stuck={row.stuck} />
         <p className="mt-1 text-[12.5px] text-muted">{STATE_META[st].plain}</p>
 

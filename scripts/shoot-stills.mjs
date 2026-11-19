@@ -15,7 +15,7 @@ const environmentApi = (url) => url.pathname === "/api/environments";
 try {
   const floor = await browser.newPage({ viewport, colorScheme: "light" });
   await open(floor, "/");
-  await floor.getByRole("button", { name: "Start isolated demo" }).click();
+  await floor.getByRole("button", { name: "Start fresh demo" }).click();
   await floor.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
   await fullCohort(floor, floorSeats);
   await capture(floor, "floor-light");

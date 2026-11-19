@@ -16,7 +16,7 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 // 1. Load all 120 rows in a fresh isolated demo, preserving shared data.
 await page.goto(`${BASE}/?view=table`, { waitUntil: "domcontentloaded" });
-await page.getByRole("button", { name: "Start isolated demo" }).click();
+await page.getByRole("button", { name: "Start fresh demo" }).click();
 await page.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
 await page.waitForFunction(() => document.querySelectorAll("tbody tr[data-env-id]").length === 120);
 let rows = await page.locator("tbody tr").count();

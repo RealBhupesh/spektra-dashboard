@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { TopDownMap, type MapNavigation } from "./top-down-map";
 import * as THREE from "three";
 import { RoundedBoxGeometry } from "three/addons/geometries/RoundedBoxGeometry.js";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -13,11 +14,14 @@ import {
   seatStatus,
   fmtUsd,
 } from "./ui";
+export type Projection = "2D" | "3D";
 export type ColorMode = "status" | "spend" | "progress";
 interface Props {
   everyone: EnvRow[];
   matched: Set<string> | null;
   mode: ColorMode;
+  projection: Projection;
+  onProjectionChange: (projection: Projection) => void;
   onModeChange: (m: ColorMode) => void;
   selectedId: string | null;
   onSelect: (id: string | null) => void;
@@ -52,6 +56,7 @@ export function FloorMap(props: Props) {
   const host = useRef<HTMLDivElement>(null),
     latest = useRef(props);
   latest.current = props;
+  const topDownNavigation = useRef<MapNavigation>(null);
   const engine = useRef<{
     update: () => void;
     focus: (id: string | null) => void;
@@ -61,6 +66,9 @@ export function FloorMap(props: Props) {
   const [error, setError] = useState(false),
     [hover, setHover] = useState<string | null>(null),
     [seatList, setSeatList] = useState(false);
+  const { projection, loading } = props;
+  const available = props.everyone.length > 0;
+  const navigation = () => projection === "2D" ? topDownNavigation.current : engine.current;
   const selected = props.everyone.find((r) => r.id === props.selectedId);
   useEffect(() => {
     const el = host.current;
@@ -566,7 +574,7 @@ export function FloorMap(props: Props) {
       },
     };
     update();
-    home();
+    focus(latest.current.selectedId);
     let oldWidth = 0;
     const ro = new ResizeObserver(() => {
       const w = el.clientWidth,
@@ -622,14 +630,15 @@ export function FloorMap(props: Props) {
       renderer.domElement.remove();
       engine.current = null;
     };
-  }, []);
+  }, [projection, available]);
   useEffect(() => {
     engine.current?.update();
   }, [props.everyone, props.matched, props.mode]);
   useEffect(() => {
     engine.current?.focus(props.selectedId);
   }, [props.selectedId]);
-  const hovered = props.everyone.find((r) => r.id === hover);
+  const hovered = projection === "3D" && props.everyone.find((r) => r.id === hover);
+  const maxSpend = Math.max(0, ...props.everyone.map((r) => r.spendUsd));
   const counts = props.everyone.reduce(
     (a, r) => {
       a[seatStatus(r)]++;
@@ -654,24 +663,47 @@ export function FloorMap(props: Props) {
               : "120-SEAT COMPUTER LAB"}
           </span>
           <h2>
-            {selected
+            {loading ? (
+              <>
+                <span className="sr-only">Loading floor map</span>
+                <span className="skeleton room-title-skeleton" aria-hidden="true" />
+              </>
+            ) : selected
               ? `${seatOf(selected.id)} · ${selected.learnerName}`
               : "A place for every learner."}
           </h2>
         </div>
-        <div className="room-seg" role="group" aria-label="Color seats by">
-          {(["status", "spend", "progress"] as const).map((m) => (
-            <button
-              key={m}
-              aria-pressed={props.mode === m}
-              onClick={() => props.onModeChange(m)}
-            >
-              {m[0].toUpperCase() + m.slice(1)}
-            </button>
-          ))}
+        <div className="room-controls">
+          <div className="room-seg" role="group" aria-label="Map view mode">
+            {(["2D", "3D"] as const).map((view) => (
+              <button
+                key={view}
+                aria-pressed={projection === view}
+                onClick={() => {
+                  if (projection === view) return;
+                  setHover(null);
+                  setError(false);
+                  props.onProjectionChange(view);
+                }}
+              >
+                {view}
+              </button>
+            ))}
+          </div>
+          <div className="room-seg" role="group" aria-label="Color seats by">
+            {(["status", "spend", "progress"] as const).map((m) => (
+              <button
+                key={m}
+                aria-pressed={props.mode === m}
+                onClick={() => props.onModeChange(m)}
+              >
+                {m[0].toUpperCase() + m.slice(1)}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
-      {props.stale && (
+      {props.stale && available && (
         <p className="room-notice" role="status">
           Showing the last snapshot
           {props.lastOkAt
@@ -680,37 +712,58 @@ export function FloorMap(props: Props) {
           . Reconnecting. PCs may be out of date.
         </p>
       )}
-      {props.matched !== null && (
+      {available && props.matched !== null && (
         <p className="room-notice" data-filter-note>
-          {props.matched.size} of {props.everyone.length} PCs highlighted.
+          {props.matched.size} of {props.everyone.length} PCs highlighted. Seats outside the filters are dimmed and remain selectable.
           Summary and attention count the whole room.
         </p>
       )}
       <div
         className="room-stage"
-        ref={host}
-        tabIndex={0}
+        data-projection={projection}
+        ref={projection === "3D" && available ? host : undefined}
+        tabIndex={projection === "3D" && available && !error ? 0 : undefined}
         onKeyDown={(e) => {
-          if (e.key === "+" || e.key === "=") engine.current?.zoom(0.8);
-          if (e.key === "-") engine.current?.zoom(1.25);
-          if (e.key === "0") engine.current?.home();
+          if (e.key === "+" || e.key === "=") navigation()?.zoom(0.8);
+          if (e.key === "-") navigation()?.zoom(1.25);
+          if (e.key === "0") navigation()?.home();
         }}
       >
-        {error && (
+        {projection === "3D" && error && available && (
           <div className="room-fallback">
             <h3>3D view is unavailable on this device.</h3>
-            <p>
-              Every learner, filter and action is still available in the list.
-            </p>
-            <button className="btn" onClick={props.onOpenTable}>
-              Open all learners
-            </button>
+            <div className="flex flex-wrap justify-center gap-2">
+              <button className="btn" onClick={() => props.onProjectionChange("2D")}>Open 2D map</button>
+              <button className="btn" onClick={props.onOpenTable}>Open all learners</button>
+            </div>
           </div>
         )}
-        {props.loading && (
+        {loading && (
           <div className="room-loading" role="status">
-            Preparing your workshop…
+            <div className="room-skeleton" aria-hidden="true">
+              {Array.from({ length: 4 }, (_, bench) => (
+                <div key={bench}>
+                  {Array.from({ length: 12 }, (_, pc) => <i className="skeleton" key={pc} />)}
+                </div>
+              ))}
+            </div>
+            <span>Preparing your workshop…</span>
           </div>
+        )}
+        {!available && !loading && <div className="room-loading">Workshop map unavailable.</div>}
+        {projection === "2D" && available && (
+          <TopDownMap
+            navigation={topDownNavigation}
+            everyone={props.everyone}
+            matched={props.matched}
+            selectedId={props.selectedId}
+            onSelect={props.onSelect}
+            tint={(row) => {
+              if (props.mode === "status") return colors[seatStatus(row)];
+              const intensity = props.mode === "spend" ? row.spendUsd / (maxSpend || 1) : row.progressPct / 100;
+              return new THREE.Color("#233744").lerp(new THREE.Color("#b3d7d3"), intensity).getStyle();
+            }}
+          />
         )}
         {hovered && (
           <div className="room-hover" role="status">
@@ -724,56 +777,61 @@ export function FloorMap(props: Props) {
             <span>{fmtUsd(hovered.spendUsd)} spent · Click to inspect</span>
           </div>
         )}
-        <div className="room-hint">
-          Drag to explore <span>·</span> Scroll to zoom <span>·</span>{" "}
-          Right-drag to orbit
-        </div>
-        <div className="room-navigation">
-          <button onClick={() => props.onSelect(null)} disabled={!selected}>
-            ↖ Entire lab
-          </button>
-          <div role="group" aria-label="Zoom lab">
-            <button
-              aria-label="Zoom out"
-              onClick={() => engine.current?.zoom(1.25)}
+        {available && !(projection === "3D" && error) && (
+          <>
+            <div className="room-hint">
+              {projection === "2D" ? "Zoom in to explore · Drag to pan" :
+                <>Drag to explore <span>·</span> Scroll to zoom <span>·</span> Right-drag to orbit</>}
+            </div>
+            <div className="room-navigation">
+              <button onClick={() => props.onSelect(null)} disabled={!selected}>
+                ↖ Entire lab
+              </button>
+              <div role="group" aria-label="Zoom lab">
+                <button
+                  aria-label="Zoom out"
+                  onClick={() => navigation()?.zoom(1.25)}
+                >
+                  −
+                </button>
+                <button
+                  aria-label="Zoom in"
+                  onClick={() => navigation()?.zoom(0.8)}
+                >
+                  +
+                </button>
+                <button onClick={() => navigation()?.home()}>Fit</button>
+              </div>
+            </div>
+            {projection === "3D" && <div
+              className="room-minimap"
+              aria-label="Seat map, click a seat to focus"
             >
-              −
-            </button>
-            <button
-              aria-label="Zoom in"
-              onClick={() => engine.current?.zoom(0.8)}
-            >
-              +
-            </button>
-            <button onClick={() => engine.current?.home()}>Fit</button>
-          </div>
-        </div>
-        <div
-          className="room-minimap"
-          aria-label="Seat map, click a seat to focus"
-        >
-          {props.everyone
-            .slice()
-            .sort((a, b) => seatIndex(a.id) - seatIndex(b.id))
-            .map((r) => (
-              <button
-                key={r.id}
-                tabIndex={-1}
-                aria-label={`Focus seat ${seatOf(r.id)}, ${r.learnerName}`}
-                title={`${seatOf(r.id)} · ${r.learnerName}`}
-                onClick={() => props.onSelect(r.id)}
-                style={{
-                  background:
-                    props.selectedId === r.id
-                      ? "#eff8ff"
-                      : colors[seatStatus(r)],
-                }}
-              />
-            ))}
-        </div>
+              {props.everyone
+                .slice()
+                .sort((a, b) => seatIndex(a.id) - seatIndex(b.id))
+                .map((r) => (
+                  <button
+                    key={r.id}
+                    tabIndex={-1}
+                    aria-label={`Focus seat ${seatOf(r.id)}, ${r.learnerName}`}
+                    title={`${seatOf(r.id)} · ${r.learnerName}`}
+                    onClick={() => props.onSelect(r.id)}
+                    style={{
+                      opacity: props.matched && !props.matched.has(r.id) ? 0.45 : 1,
+                      background:
+                        props.selectedId === r.id
+                          ? "#eff8ff"
+                          : colors[seatStatus(r)],
+                    }}
+                  />
+                ))}
+            </div>}
+          </>
+        )}
       </div>
-      {props.mode !== "status" && <div className="room-scale"><span>{props.mode === "spend" ? "Spend per PC" : "Lab progress"}</span><b>{props.mode === "spend" ? "$0" : "0%"}</b><i/><b>{props.mode === "spend" ? fmtUsd(Math.max(0,...props.everyone.map(r=>r.spendUsd))) : "100%"}</b></div>}
-      <div className="room-legend">
+      {available && props.mode !== "status" && <div className="room-scale"><span>{props.mode === "spend" ? "Spend per PC" : "Lab progress"}</span><b>{props.mode === "spend" ? "$0" : "0%"}</b><i/><b>{props.mode === "spend" ? fmtUsd(maxSpend) : "100%"}</b></div>}
+      {available && <div className="room-legend">
         {(Object.keys(counts) as SeatStatus[]).map((s) => (
           <button
             key={s}
@@ -791,8 +849,8 @@ export function FloorMap(props: Props) {
         >
           Browse seats {seatList ? "−" : "+"}
         </button>
-      </div>
-      {seatList && (
+      </div>}
+      {available && seatList && (
         <div
           className="seat-browser"
           role="group"

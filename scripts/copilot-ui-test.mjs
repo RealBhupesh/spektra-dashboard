@@ -1,7 +1,7 @@
 import {chromium} from 'playwright';
 const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome-stable',args:['--no-sandbox','--enable-webgl','--use-angle=swiftshader','--enable-unsafe-swiftshader']});
 const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});page.setDefaultTimeout(15000);let count=0;function ok(n,c){if(!c)throw Error(n);console.log('PASS',n);count++;}
-await page.goto('http://localhost:3000');await page.getByRole('button',{name:'Start isolated demo'}).click();await page.getByText('Isolated demo · Simulated data',{exact:true}).waitFor();
+await page.goto('http://localhost:3000');await page.getByRole('button',{name:'Start fresh demo'}).click();await page.getByText('Isolated demo · Simulated data',{exact:true}).waitFor();
 await page.getByRole('button',{name:'Switch to dark theme'}).click();
 const demo=await page.evaluate(()=>sessionStorage.getItem('cloudlabs-demo-session'));const get=async()=>await(await page.request.get('http://localhost:3000/api/environments?include=all',{headers:{'x-demo-session':demo}})).json();let data=await get();const target=data.everyone.find(e=>e.state==='failed');
 await page.getByRole('button',{name:'Browse seats'}).click();await page.locator(`.seat-browser button[data-env-id="${target.id}"]`).click();await page.getByRole('button',{name:'Browse seats'}).click();await page.getByRole('button',{name:'Ask copilot about this PC'}).click();

@@ -76,7 +76,7 @@ if (process.argv.includes("--palette")) {
         if (n !== 120) failures++;
       };
       await page.goto(`${base}/?view=table`, { waitUntil: "domcontentloaded" });
-      await page.getByRole("button", { name: "Start isolated demo" }).click();
+      await page.getByRole("button", { name: "Start fresh demo" }).click();
       await page.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
       await page.waitForFunction(() => document.querySelectorAll("tbody tr[data-env-id]").length === 120);
       await page.addScriptTag({ content: axeSrc });
