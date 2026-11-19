@@ -414,4 +414,4 @@ export function resetPersistenceCache() {
   mem = null;
   lastRefreshAt = 0;
   demoMem.clear();
-      }
+}
