@@ -118,4 +118,4 @@ if (process.argv.includes("--palette")) {
   }
   console.log(`${audits} states audited, ${failures} failures.`);
   process.exitCode = failures ? 1 : 0;
-        }
+}
