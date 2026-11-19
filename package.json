@@ -15,7 +15,8 @@
     "geist": "^1.9.2",
     "next": "15.5.29",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "three": "^0.187.0"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.16",
@@ -23,6 +24,7 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/three": "^0.187.0",
     "axe-core": "^4.14.1",
     "playwright": "^1.65.1",
     "tailwindcss": "^4",
