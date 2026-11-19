@@ -39,24 +39,31 @@ export async function getSnapshot(now = Date.now(), demoId: string | null = null
     now,
     sessionStartedAt,
     sessionExpiresAt: demoId === null ? null : sessionStartedAt + DEMO_LIFETIME_MS,
+    // The log is append-only, so its length is a monotone version for this
+    // session scope, and the log itself is the inclusion proof: clients
+    // discard any snapshot whose actions do not contain an action they
+    // already confirmed (a count alone is not set inclusion), instead of
+    // visibly rolling back.
+    stateVersion: log.length,
+    actions: log,
     environments: computeState(seeded, sessionStartedAt, log, now),
   };
 }
 
-export async function reprovision(id: string, now = Date.now(), demoId: string | null = null): Promise<Environment | null> {
+export async function reprovision(id: string, now = Date.now(), demoId: string | null = null): Promise<{ environment: Environment; stateVersion: number; action: ReprovisionEvent | null } | null> {
   const { sessionStartedAt, log } = await live(now, demoId);
   const seeded = seedEnvironments(SEED, sessionStartedAt);
   const envs = computeState(seeded, sessionStartedAt, log, now);
   const e = envs.find((x) => x.id === id);
   if (!e) return null;
-  if (e.state !== "failed") return e; // no-op unless failed; reflected as-is
+  if (e.state !== "failed") return { environment: e, stateVersion: log.length, action: null }; // no-op unless failed; reflected as-is
   // The action only counts if it is durably appended to the shared log; a
   // failed write must fail the request, not report an ephemeral change.
   const action = { id, at: now };
   const saved = await (demoId === null ? appendAction(action) : appendDemoAction(demoId, action));
   if (!saved) throw new Error("persist_failed");
   const nextLog = [...log, action];
-  return computeState(seeded, sessionStartedAt, nextLog, now).find((x) => x.id === id)!;
+  return { environment: computeState(seeded, sessionStartedAt, nextLog, now).find((x) => x.id === id)!, stateVersion: nextLog.length, action };
 }
 
 export function summarizeSnapshot({ now, sessionStartedAt, environments: envs }: Awaited<ReturnType<typeof getSnapshot>>): SessionSummary {

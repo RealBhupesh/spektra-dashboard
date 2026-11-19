@@ -148,23 +148,63 @@ export default function Dashboard() {
   // Superseded responses are discarded: a slow earlier poll must never
   // overwrite fresher rows.
   const pollSeq = useRef(0);
+  // Stale-snapshot reconciliation: the action log is append-only and every
+  // snapshot carries it. A serverless instance whose cache predates an
+  // action this tab already confirmed answers with a log that does NOT
+  // contain that action; applying it would visibly roll the row back to
+  // "failed" until that instance refreshes. The check is INCLUSION of the
+  // exact confirmed action, not a count: a newer-looking snapshot can have
+  // more actions yet still miss this one. Stale snapshots are discarded and
+  // the confirmed state holds until any instance serves the action.
+  const pendingActions = useRef(new Map<string, string>()); // `${envId}:${at}` -> envId
   const poll = useCallback(async () => {
     if (sessionId === undefined || sessionId !== activeSession.current) return;
     const seq = ++pollSeq.current;
     let errorMessage = "Live data unavailable.";
+    let sessionGone = false;
     try {
       const eRes = await fetch(`/api/environments?${params.toString()}&include=all`, {
         cache: "no-store",
         headers: sessionId ? { "x-demo-session": sessionId } : undefined,
       });
       if (!eRes.ok) {
-        errorMessage = sessionId && (eRes.status === 404 || eRes.status === 410)
+        sessionGone = Boolean(sessionId && (eRes.status === 404 || eRes.status === 410));
+        errorMessage = sessionGone
           ? "This isolated demo is no longer available. Start a new demo or return to the shared session."
           : `Live data unavailable (${eRes.status === 503 ? "storage unavailable" : `server ${eRes.status}`}).`;
         throw new Error(errorMessage);
       }
       const e = await eRes.json();
       if (seq !== pollSeq.current) return;
+      if (Array.isArray(e.actions)) {
+        if (pendingActions.current.size) {
+          const present = new Set(
+            (e.actions as { id?: unknown; at?: unknown }[]).map((a) => `${String(a?.id)}:${String(a?.at)}`),
+          );
+          if ([...pendingActions.current.keys()].some((k) => !present.has(k))) {
+            return; // stale instance cache: a confirmed action is missing; keep the current view
+          }
+          // Every confirmed action is visible in this snapshot: release the
+          // rows they gated.
+          const released = new Set(pendingActions.current.values());
+          pendingActions.current.clear();
+          setPending((p) => {
+            const n = new Set(p);
+            for (const id of released) n.delete(id);
+            return n;
+          });
+        }
+      } else if (pendingActions.current.size) {
+        // Server without the action log (mixed deploy): fall back to applying
+        // every response and release gated rows.
+        const gated = new Set(pendingActions.current.values());
+        pendingActions.current.clear();
+        setPending((p) => {
+          const n = new Set(p);
+          for (const id of gated) n.delete(id);
+          return n;
+        });
+      }
       const s = e.summary as Summary;
       const nextRows = e.environments as EnvRow[];
       const all = Array.isArray(e.everyone) ? (e.everyone as EnvRow[]) : nextRows;
@@ -194,15 +234,48 @@ export default function Dashboard() {
       setLoading(false);
     } catch {
       if (seq !== pollSeq.current) return;
+      if (sessionGone) {
+        // The session is gone: no snapshot will ever confirm a gated row.
+        pendingActions.current.clear();
+        setPending(new Set());
+      }
       setFetchError(errorMessage);
       setLoading(false);
     }
   }, [params, sessionId]);
 
   useEffect(() => {
-    poll();
-    const t = window.setInterval(poll, POLL_MS);
-    return () => window.clearInterval(t);
+    // A hidden tab keeps no interval running and makes NO initial fetch: a
+    // page opened straight into a background tab costs zero poll requests
+    // until it is first seen. Becoming visible polls immediately, so nobody
+    // ever stares at state staler than one render. (The loading skeleton
+    // stays up while hidden, which is honest: nothing has been loaded yet.)
+    let t: number | undefined;
+    const start = () => {
+      if (t === undefined) t = window.setInterval(poll, POLL_MS);
+    };
+    const stop = () => {
+      if (t !== undefined) {
+        window.clearInterval(t);
+        t = undefined;
+      }
+    };
+    const onVisibility = () => {
+      if (document.hidden) stop();
+      else {
+        poll();
+        start();
+      }
+    };
+    if (!document.hidden) {
+      poll();
+      start();
+    }
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [poll]);
 
   const [actionError, setActionError] = useState<{ id: string; message: string } | null>(null);
@@ -217,6 +290,7 @@ export default function Dashboard() {
       // The new selection still applies for this visit.
     }
     prevStates.current.clear();
+    pendingActions.current.clear();
     setSessionId(id);
     setSessionError(null);
     setSummary(null);
@@ -261,13 +335,26 @@ export default function Dashboard() {
           headers: sessionId ? { "x-demo-session": sessionId } : undefined,
         });
         if (!res.ok) throw new Error(`server ${res.status}`);
+        const body = await res.json().catch(() => null);
+        const confirmed =
+          body && body.action && typeof body.action.id === "string" && typeof body.action.at === "number"
+            ? (body.action as { id: string; at: number })
+            : null;
+        if (confirmed && generation === sessionGeneration.current) {
+          // Hold the pending state until a poll from ANY instance INCLUDES
+          // this exact append; a stale instance's snapshot is discarded by
+          // the inclusion check in poll() instead of rolling the row back.
+          pendingActions.current.set(`${confirmed.id}:${confirmed.at}`, confirmed.id);
+        }
         if (generation === sessionGeneration.current) await poll();
       } catch {
         if (generation === sessionGeneration.current) {
           setActionError({ id, message: `Reprovision of ${id} (seat ${seatOf(id)}) failed.` });
         }
       } finally {
-        if (generation === sessionGeneration.current) {
+        // Without a gate the pending ends with the follow-up poll, as before;
+        // with one, poll() releases it once the action is visible here.
+        if (generation === sessionGeneration.current && ![...pendingActions.current.values()].includes(id)) {
           setPending((p) => {
             const n = new Set(p);
             n.delete(id);
@@ -676,6 +763,9 @@ export default function Dashboard() {
                   flash={flash}
                   statusFilter={statusFilter}
                   onToggleStatus={toggleStatus}
+                  onOpenTable={() => switchView("table")}
+                  stale={!!fetchError}
+                  lastOkAt={lastOkAt}
                 />
                 {!loading && !fetchError && hasFilter && rows.length === 0 && (
                   <div className="panel flex flex-wrap items-center justify-center gap-3 px-4 py-4 text-[13px] text-ink-2">

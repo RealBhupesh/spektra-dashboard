@@ -5,7 +5,7 @@ import { chromium } from "playwright";
 const base = process.env.BASE_URL || "http://localhost:3000";
 const browser = await chromium.launch();
 const viewport = { width: 1440, height: 900 };
-const floorSeats = ".seat[data-env-id]";
+const floorSeats = ".pc[data-env-id]";
 const tableRows = "tbody tr[data-env-id]";
 const capture = (page, name) => page.screenshot({ path: `screenshots/final-${name}.png`, animations: "disabled" });
 const fullCohort = (page, selector) => page.waitForFunction((selector) => document.querySelectorAll(selector).length === 120, selector);
@@ -19,7 +19,7 @@ try {
   await floor.getByText("Isolated demo · Simulated data", { exact: true }).waitFor();
   await fullCohort(floor, floorSeats);
   await capture(floor, "floor-light");
-  await floor.locator('.seat[data-st="failed"]').first().click();
+  await floor.locator('.pc[data-st="failed"]').first().click();
   await floor.getByRole("region", { name: /^Details for/ }).waitFor();
   await capture(floor, "detail");
   await floor.keyboard.press("Escape");

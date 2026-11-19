@@ -115,6 +115,11 @@ export async function GET(req: NextRequest) {
       summary,
       sessionMode: demoId === null ? "shared" : "demo",
       sessionExpiresAt: snapshot.sessionExpiresAt,
+      stateVersion: snapshot.stateVersion,
+      // The append-only action log itself: the inclusion proof a client needs
+      // to tell "an instance whose cache predates my confirmed action" apart
+      // from a current snapshot. A count alone is not set inclusion.
+      actions: snapshot.actions,
       steps,
       transitions: transitions.slice(0, 12),
       environments: filtered.map(enrich),
