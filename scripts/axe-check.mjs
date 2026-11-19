@@ -13,10 +13,10 @@ function contrast(fg, bg) {
 }
 
 function palette() {
+  // The isometric lab draws status as shape and pattern on a screen face, not
+  // as text on a seat. Check what carries meaning: each status color against
+  // the panel surface (3:1 for graphics) and each mark against its fill.
   const css = readFileSync("app/globals.css", "utf8");
-  const map = readFileSync("components/floor-map.tsx", "utf8");
-  const cutoff = Number(map.match(/style\["--ramp-text"\] = pct >= (\d+)/)?.[1]);
-  if (!Number.isFinite(cutoff)) throw new Error("Seat ramp cutoff missing");
   const rule = (selector) => {
     const start = css.indexOf(`${selector} {`);
     if (start === -1) throw new Error(`Missing rule ${selector}`);
@@ -30,36 +30,23 @@ function palette() {
     const rgb = (color) => {
       const token = color?.match(/^var\((--[^)]+)\)$/)?.[1];
       const hex = token ? value(tokens, token) : color;
-      if (!/^#[\da-f]{6}$/i.test(hex ?? "")) throw new Error(`Unresolved seat color ${color}`);
+      if (!/^#[\da-f]{6}$/i.test(hex ?? "")) throw new Error(`Unresolved color ${color}`);
       return [1, 3, 5].map((index) => parseInt(hex.slice(index, index + 2), 16));
     };
-    const verify = (label, fg, bg) => {
+    const verify = (label, fg, bg, min) => {
       const ratio = contrast(fg, bg);
       minimum = Math.min(minimum, ratio);
       count++;
-      if (ratio < 4.5) throw new Error(`${selector} ${label}: ${ratio.toFixed(2)}:1`);
+      if (ratio < min) throw new Error(`${selector} ${label}: ${ratio.toFixed(2)}:1 (need ${min})`);
     };
-    const start = rgb("var(--seat-ramp-start)");
-    const end = rgb("var(--seat-ramp-end)");
-    const dim = rule('.seat[data-mode][data-dim="true"]');
-    for (const mode of ["status", "spend", "progress"]) {
-      verify(`${mode} filtered`, rgb(value(dim, "--txt")), rgb(value(dim, "--fill")));
-      if (mode === "status") {
-        for (const state of ["in_use", "failed", "stuck", "ready", "provisioning", "deprovisioned"]) {
-          const status = rule(`.seat[data-mode="status"][data-st="${state}"]`);
-          verify(state, rgb(value(status, "--txt")), rgb(value(status, "--fill") ?? "var(--surface)"));
-        }
-      } else {
-        for (let pct = 0; pct <= 100; pct++) {
-          const fg = rgb(pct >= cutoff ? "#ffffff" : "var(--seat-ramp-low-text)");
-          const bg = start.map((channel, index) => Math.round((channel * (100 - pct) + end[index] * pct) / 100));
-          verify(`${mode} ${pct}%`, fg, bg);
-        }
-      }
-    }
-    verify("row label", rgb(value(rule(".row-label"), "color")), rgb("var(--surface)"));
+    const surface = rgb("var(--surface)");
+    for (const t of ["--ready", "--booting", "--line-strong", "--ink"]) verify(`${t} edge vs surface`, rgb(`var(${t})`), surface, 3);
+    verify("failed mark on fill", rgb("var(--seat-failure-text)"), rgb("var(--failed)"), 3);
+    verify("stuck mark on fill", rgb("#1d1300"), rgb("var(--stuck)"), 3);
+    verify("finished tick on fill", rgb("var(--ink-2)"), rgb("var(--off)"), 3);
+    verify("bench row label", rgb("var(--ink-2)"), surface, 4.5);
   }
-  console.log(`${count} palette pairs passed at 4.5:1 or higher (minimum ${minimum.toFixed(2)}:1).`);
+  console.log(`${count} graphic/text pairs passed (minimum ${minimum.toFixed(2)}:1).`);
 }
 
 if (process.argv.includes("--palette")) {
@@ -84,22 +71,9 @@ if (process.argv.includes("--palette")) {
           console.log(`  ${rule.id}: ${rule.nodes.length} nodes, e.g. ${rule.nodes[0]?.target?.join(" ")}`);
         }
         if (!seats) return;
-        const colors = await page.locator(".seat[data-env-id]").evaluateAll((nodes) => {
-          const ctx = document.createElement("canvas").getContext("2d", { willReadFrequently: true });
-          const pixel = (color) => {
-            ctx.clearRect(0, 0, 1, 1);
-            ctx.fillStyle = color;
-            ctx.fillRect(0, 0, 1, 1);
-            return Array.from(ctx.getImageData(0, 0, 1, 1).data.slice(0, 3));
-          };
-          return nodes.map((node) => {
-            const { color, backgroundColor } = getComputedStyle(node);
-            return [pixel(color), pixel(backgroundColor)];
-          });
-        });
-        const minimum = Math.min(...colors.map(([fg, bg]) => contrast(fg, bg)));
-        console.log(`  ${colors.length} computed seat color pairs, minimum ${minimum.toFixed(2)}:1`);
-        if (colors.length !== 120 || minimum < 4.5) failures++;
+        const n = await page.locator(".pc[data-env-id]").count();
+        console.log(`  ${n} PCs drawn`);
+        if (n !== 120) failures++;
       };
       await page.goto(`${base}/?view=table`, { waitUntil: "domcontentloaded" });
       await page.getByRole("button", { name: "Start isolated demo" }).click();
@@ -126,15 +100,15 @@ if (process.argv.includes("--palette")) {
       await page.getByRole("tab", { name: "Floor map" }).click();
       for (const mode of ["Status", "Spend", "Progress"]) {
         await page.getByRole("button", { name: mode, exact: true }).click();
-        await page.waitForFunction(() => document.querySelectorAll(".seat[data-env-id]").length === 120 && !document.querySelector(".seat[data-dim]"));
+        await page.waitForFunction(() => document.querySelectorAll(".pc[data-env-id]").length === 120 && !document.querySelector(".pc[data-dim]"));
         await audit(`floor ${mode}`, true);
         await failed.click();
-        await page.locator('.seat[data-dim="true"]').first().waitFor();
+        await page.locator('.pc[data-dim="true"]').first().waitFor();
         await audit(`floor ${mode} filtered`, true);
         await failed.click();
       }
       await page.getByRole("button", { name: "Status", exact: true }).click();
-      await page.locator('.seat[data-st="failed"]').first().click();
+      await page.locator('.pc[data-st="failed"]').first().click();
       await page.getByRole("region", { name: /^Details for/ }).waitFor();
       await audit("floor detail", true);
       await context.close();
@@ -144,4 +118,4 @@ if (process.argv.includes("--palette")) {
   }
   console.log(`${audits} states audited, ${failures} failures.`);
   process.exitCode = failures ? 1 : 0;
-}
+        }
