@@ -641,4 +641,4 @@ function SeatCard({ row, x, y, below }: { row: EnvRow; x: number; y: number; bel
       {(row.state === "ready" || row.state === "provisioning") && <div className="mt-1.5 text-[12px] text-muted">Hasn&apos;t started the lab</div>}
     </div>
   );
-  }
+}
