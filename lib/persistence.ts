@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { put, list } from "@vercel/blob";
+import { put, list, head, BlobNotFoundError } from "@vercel/blob";
 import { ReprovisionEvent } from "./replay";
 
 // The simulation itself is derivable (lib/replay.ts), so the only state that
@@ -12,7 +12,14 @@ import { ReprovisionEvent } from "./replay";
 //     other (no read-modify-write of a shared document, so no lost updates).
 //   - Warm instances REFRESH from the shared store every REFRESH_TTL_MS and
 //     merge by key, so actions taken through one instance become visible to
-//     every other instance within that window.
+//     every other instance within that window. Isolated demo sessions are
+//     cached per instance under the same TTL and the same merge-by-key rule.
+//   - Blob operation budget (Hobby allowance: advanced ops are the scarce
+//     one): anchor reads use head() on the known key, a simple operation;
+//     list() (an advanced operation) runs at most once per refresh window
+//     per session per instance, and only to discover keys written by OTHER
+//     instances - a manifest read would be a read-modify-write and would
+//     lose the append-only no-lost-update property, so list stays.
 //   - Failures are visible: a mutation that cannot be written fails the
 //     request (the UI shows it) instead of pretending to save, and a cold
 //     instance that cannot read the store answers 503 instead of silently
@@ -90,13 +97,18 @@ async function blobFetchJson(url: string): Promise<unknown> {
 }
 
 async function blobReadAnchor(pathname = ANCHOR_PATH): Promise<number | null> {
+  // head() reads metadata for a KNOWN key and is billed as a simple
+  // operation; a list() here would be an advanced operation on every read.
   // Explicit token: without it the SDK prefers the auto-injected OIDC
   // credentials, which this store connection does not allow for writes.
-  const { blobs } = await list({ prefix: pathname, limit: 1, token: process.env.BLOB_READ_WRITE_TOKEN });
-  const b = blobs.find((x) => x.pathname === pathname);
-  if (!b) return null;
-  const raw = (await blobFetchJson(b.downloadUrl)) as { sessionStartedAt?: number };
-  return typeof raw.sessionStartedAt === "number" ? raw.sessionStartedAt : null;
+  try {
+    const meta = await head(pathname, { token: process.env.BLOB_READ_WRITE_TOKEN });
+    const raw = (await blobFetchJson(meta.downloadUrl)) as { sessionStartedAt?: number };
+    return typeof raw.sessionStartedAt === "number" ? raw.sessionStartedAt : null;
+  } catch (err) {
+    if (err instanceof BlobNotFoundError) return null;
+    throw err;
+  }
 }
 
 async function blobListActions(prefix = ACTIONS_PREFIX): Promise<{ pathname: string; downloadUrl: string }[]> {
@@ -150,7 +162,10 @@ async function blobWriteAnchor(anchor: number, pathname = ANCHOR_PATH): Promise<
   }
 }
 
-async function blobAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): Promise<boolean> {
+// Returns the storage key written, or null when the action was NOT saved.
+// Callers update their own caches with the key and must fail the request
+// visibly on null instead of reporting an ephemeral change.
+async function blobAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): Promise<string | null> {
   const key = `${prefix}${ev.at}-${ev.id}-${randomUUID()}.json`;
   try {
     await put(key, JSON.stringify(ev), {
@@ -160,14 +175,10 @@ async function blobAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): 
       contentType: "application/json",
       token: process.env.BLOB_READ_WRITE_TOKEN,
     });
-    if (prefix === ACTIONS_PREFIX) {
-      mem?.actions.set(key, ev);
-      slog(`appended=blob actions=${mem?.actions.size ?? 1}`);
-    }
-    return true;
+    return key;
   } catch (err) {
     console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
-    return false;
+    return null;
   }
 }
 
@@ -232,22 +243,18 @@ function fileWriteAnchor(anchor: number): number {
   }
 }
 
-function fileAppendAction(ev: ReprovisionEvent, dir = ACTIONS_DIR): boolean {
+function fileAppendAction(ev: ReprovisionEvent, dir = ACTIONS_DIR): string | null {
   const key = `${ev.at}-${ev.id}-${randomUUID()}.json`;
   const pending = path.join(dir, `${key}.tmp`);
   try {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(pending, JSON.stringify(ev), { flag: "wx" });
     fs.renameSync(pending, path.join(dir, key));
-    if (dir === ACTIONS_DIR) {
-      mem?.actions.set(key, ev);
-      slog(`appended=file actions=${mem?.actions.size ?? 1}`);
-    }
-    return true;
+    return key;
   } catch (err) {
     try { fs.rmSync(pending, { force: true }); } catch { /* preserve the original failure */ }
     console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
-    return false;
+    return null;
   }
 }
 
@@ -287,8 +294,40 @@ export async function saveAnchor(anchor: number): Promise<number> {
 
 // Append one reprovision action. False means the action was NOT saved;
 // callers must fail the request visibly instead of reporting a saved change.
+// A successful append updates this instance's cache immediately, so the
+// same instance always reads its own write within the refresh window.
 export async function appendAction(ev: ReprovisionEvent): Promise<boolean> {
-  return useBlob() ? blobAppendAction(ev) : fileAppendAction(ev);
+  const key = useBlob() ? await blobAppendAction(ev) : fileAppendAction(ev);
+  if (key === null) return false;
+  mem?.actions.set(key, ev);
+  slog(`appended actions=${mem?.actions.size ?? 1}`);
+  return true;
+}
+
+// ---------- Isolated demo sessions ----------
+
+// Per-instance cache for isolated demo sessions, under the same TTL and
+// merge-by-key rules as the shared session cache. Before this cache existed,
+// EVERY poll of a demo session listed the anchor and the actions prefix -
+// two advanced operations per poll. Entries are tiny; evicted FIFO.
+// refreshedAt uses the real clock (like lastRefreshAt above); the caller's
+// `now` is simulation time and drives only the expiry check.
+interface DemoMem {
+  anchor: number;
+  actions: Map<string, ReprovisionEvent>; // key: storage key, as in Mem
+  refreshedAt: number; // Date.now()
+}
+const demoMem = new Map<string, DemoMem>();
+const MAX_CACHED_DEMOS = 64;
+
+function demoCacheSet(id: string, entry: DemoMem) {
+  demoMem.delete(id);
+  demoMem.set(id, entry);
+  while (demoMem.size > MAX_CACHED_DEMOS) {
+    const oldest = demoMem.keys().next().value;
+    if (oldest === undefined) break;
+    demoMem.delete(oldest);
+  }
 }
 
 function demoPaths(id: string) {
@@ -306,35 +345,73 @@ export async function createDemoSession(now = Date.now()) {
     fs.mkdirSync(path.join(dir, "actions"), { recursive: true });
     fs.writeFileSync(path.join(dir, "anchor.json"), JSON.stringify({ sessionStartedAt: now }), { flag: "wx" });
   }
+  // The creating instance already knows the full state; it needs no store
+  // round-trip for this demo until the refresh window passes.
+  demoCacheSet(id, { anchor: now, actions: new Map(), refreshedAt: Date.now() });
   return { id, expiresAt: now + DEMO_LIFETIME_MS };
 }
 
 export async function loadDemoSession(id: string, now: number): Promise<Persisted> {
   const { dir, prefix } = demoPaths(id);
   const isBlob = useBlob();
+  const cached = demoMem.get(id);
+  const finish = (anchor: number, actions: Map<string, ReprovisionEvent>): Persisted => {
+    if (now >= anchor + DEMO_LIFETIME_MS) throw new DemoSessionError("demo_expired");
+    return { sessionStartedAt: anchor, reprovisionLog: [...actions.values()].sort((a, b) => a.at - b.at) };
+  };
+  // Within the refresh window this instance's cache answers: zero store
+  // operations. Same-instance writes are already in the cache (appendDemoAction).
+  if (cached && Date.now() - cached.refreshedAt < REFRESH_TTL_MS) {
+    return finish(cached.anchor, cached.actions);
+  }
   try {
     const anchor = isBlob ? await blobReadAnchor(`${prefix}anchor.json`) : fileReadAnchor(path.join(dir, "anchor.json"));
     if (anchor === null) throw new DemoSessionError("demo_not_found");
-    if (now >= anchor + DEMO_LIFETIME_MS) throw new DemoSessionError("demo_expired");
+    if (isBlob) {
+      // Merge by key: only actions written by OTHER instances are fetched;
+      // keys already in the cache are never re-downloaded.
+      const actions = cached?.actions ?? new Map<string, ReprovisionEvent>();
+      for (const e of await blobListActions(`${prefix}actions/`)) {
+        if (actions.has(e.pathname)) continue;
+        const v = await blobFetchJson(e.downloadUrl);
+        if (validAction(v)) actions.set(e.pathname, v);
+      }
+      demoCacheSet(id, { anchor, actions, refreshedAt: Date.now() });
+      return finish(anchor, actions);
+    }
     const actionDir = path.join(dir, "actions");
-    const raw = isBlob
-      ? await Promise.all((await blobListActions(`${prefix}actions/`)).map(({ downloadUrl }) => blobFetchJson(downloadUrl)))
-      : fs.readdirSync(actionDir).filter((file) => file.endsWith(".json"))
-          .map((file) => JSON.parse(fs.readFileSync(path.join(actionDir, file), "utf8")) as unknown);
-    return { sessionStartedAt: anchor, reprovisionLog: raw.filter(validAction) };
+    const raw = fs.readdirSync(actionDir).filter((file) => file.endsWith(".json"))
+      .map((file) => [file, JSON.parse(fs.readFileSync(path.join(actionDir, file), "utf8")) as unknown] as const);
+    const actions = new Map<string, ReprovisionEvent>();
+    for (const [file, v] of raw) if (validAction(v)) actions.set(file, v);
+    demoCacheSet(id, { anchor, actions, refreshedAt: Date.now() });
+    return finish(anchor, actions);
   } catch (err) {
     if (err instanceof DemoSessionError) throw err;
+    // Same degradation rule as the shared session: a warm cache serves
+    // stale state instead of failing; a cold instance fails visibly.
+    if (cached) {
+      console.error(`[persistence] instance=${INSTANCE_ID} demo refresh failed, serving memory:`, err instanceof Error ? err.message : err);
+      return finish(cached.anchor, cached.actions);
+    }
     throw new PersistUnavailable("isolated session storage unavailable");
   }
 }
 
 export async function appendDemoAction(id: string, ev: ReprovisionEvent): Promise<boolean> {
   const { dir, prefix } = demoPaths(id);
-  return useBlob() ? blobAppendAction(ev, `${prefix}actions/`) : fileAppendAction(ev, path.join(dir, "actions"));
+  const key = useBlob() ? await blobAppendAction(ev, `${prefix}actions/`) : fileAppendAction(ev, path.join(dir, "actions"));
+  if (key === null) return false;
+  // Same-instance read-after-write: the next cached load includes this action.
+  const c = demoMem.get(id);
+  if (c) c.actions.set(key, ev);
+  slog(`appended demo=${id.slice(0, 8)} actions=${c?.actions.size ?? 1}`);
+  return true;
 }
 
-// Test hook: drop the in-memory copy so the next load re-reads the backend.
+// Test hook: drop the in-memory copies so the next load re-reads the backend.
 export function resetPersistenceCache() {
   mem = null;
   lastRefreshAt = 0;
-}
+  demoMem.clear();
+      }
