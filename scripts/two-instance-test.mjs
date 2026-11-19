@@ -126,6 +126,28 @@ if (process.argv[2] === "--handler") {
     ok("fresh demos each contain a full untouched cohort", matchesCohort(seedA) && matchesCohort(seedB) && byId(seedA, x).state === "failed" && byId(seedB, x).state === "failed");
     ok("mode and expiry are present only for scoped demo rows", seedA.body.sessionMode === "demo" && seedA.body.sessionExpiresAt === createdA.body.expiresAt && firstA.body.sessionMode === "shared" && firstA.body.sessionExpiresAt === null);
     ok("demo reprovision persists in its own scope", (await action(a, w, demoA)).body.environment?.state === "provisioning" && byId(await snapshot(b, demoA), w).state !== "failed");
+
+    // Version signal for client-side reconciliation: an instance whose cache
+    // predates a confirmed action answers with a LOWER stateVersion (the
+    // client discards that snapshot instead of rolling back); after the
+    // refresh window the instance catches up and serves the action.
+    const demoV = (await create(a)).body.id;
+    const seedV = await snapshot(a, demoV);
+    const fv = failedIds(seedV)[0];
+    const cachedV0 = (await snapshot(b, demoV)).body.stateVersion; // b caches demoV before the action
+    const actionV = await action(a, fv, demoV);
+    ok("reprovision response carries the confirming stateVersion", actionV.body.stateVersion === 1 && cachedV0 === 0);
+    const confirmedAction = actionV.body.action;
+    ok("reprovision response carries the appended action event", confirmedAction && confirmedAction.id === fv && typeof confirmedAction.at === "number");
+    const hasAction = (res, action) => Array.isArray(res.body.actions) && res.body.actions.some((x) => x.id === action.id && x.at === action.at);
+    const staleB = await snapshot(b, demoV); // within the refresh window: b's cache predates the action
+    ok("stale instance answers a lower version with the pre-action row", staleB.body.stateVersion === 0 && byId(staleB, fv).state === "failed");
+    ok("stale instance's log lacks the confirmed action (inclusion check fails)", !hasAction(staleB, confirmedAction));
+    await delay(ttl + 40);
+    const caughtUpB = await snapshot(b, demoV);
+    ok("instance catches up to the confirmed version after refresh", caughtUpB.body.stateVersion === 1 && byId(caughtUpB, fv).state !== "failed");
+    ok("caught-up instance's log includes the confirmed action", hasAction(caughtUpB, confirmedAction));
+
     const [otherDemo, shared] = await Promise.all([snapshot(b, demoB), snapshot(b)]);
     ok("an action leaks neither state nor transitions into another demo or shared", byId(otherDemo, w).state === "failed" && byId(shared, w).state === "failed" && otherDemo.body.transitions.every((t) => t.id !== w) && shared.body.transitions.every((t) => t.id !== w));
 
@@ -139,6 +161,11 @@ if (process.argv[2] === "--handler") {
     const invalidWrite = await action(a, w, "../../actions");
     ok("unknown and malformed demo ids cannot fall back to shared", invalidRead.code === 404 && invalidRead.body.error === "demo_not_found" && invalidWrite.code === 404 && byId(await snapshot(a), w).state === "failed");
     fs.writeFileSync(path.join(data, "demos", demoA, "anchor.json"), JSON.stringify({ sessionStartedAt: Date.now() - 25 * 3600_000 }));
+    // Out-of-band anchor rewrites surface after the refresh window (demo
+    // sessions are cached per instance under the same TTL as the shared
+    // session). Real expiry needs no rewrite: the anchor never changes, and
+    // the cached anchor itself drives the 410 once now passes anchor+24h.
+    await delay(ttl + 40);
     const [expiredRead, expiredWrite] = await Promise.all([snapshot(a, demoA), action(b, w, demoA)]);
     ok("expired demo rejects reads and actions", expiredRead.code === 410 && expiredWrite.code === 410 && expiredRead.body.error === "demo_expired");
     ok("creating a new demo leaves existing scopes and expired records intact", (await create(a)).code === 201 && byId(await snapshot(a, demoB), w).state === "failed" && (await snapshot(a, demoA)).code === 410);
