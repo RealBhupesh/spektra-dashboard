@@ -16,7 +16,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
     if (!updated) {
       return NextResponse.json({ error: "not_found" }, { status: 404 });
     }
-    return NextResponse.json({ ok: true, environment: updated });
+    // stateVersion + the appended action let the client hold its pending
+    // state until a poll from any instance INCLUDES this exact action,
+    // instead of rolling back on a stale one (count alone is not inclusion).
+    return NextResponse.json({ ok: true, environment: updated.environment, stateVersion: updated.stateVersion, action: updated.action });
   } catch (err) {
     if (err instanceof DemoSessionError) return NextResponse.json({ error: err.code }, { status: err.status });
     const msg = err instanceof Error && err.message === "persist_failed" ? "persist_failed" : "persist_unavailable";
