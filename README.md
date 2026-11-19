@@ -1,6 +1,6 @@
 # CloudLabs Workshop Operations Dashboard
 
-An instructor dashboard for a simulated Azure workshop with 120 learners. The cinema-style floor keeps every seat in view, and the risk-sorted table makes failures and stalled learners quick to scan. Color distinguishes status, while the Spend and Progress maps use neutral tones.
+An instructor dashboard for a simulated Azure workshop with 120 learners. The interactive 3D floor shows 120 stable workstations, and the risk-sorted table makes failures and stalled learners quick to scan. Color distinguishes status, while the Spend and Progress maps use neutral tones.
 
 ## Run locally
 
@@ -41,3 +41,10 @@ See [VERIFICATION.md](VERIFICATION.md) for the exact commands, results, and scre
 An AI coding assistant generated the initial source, tests, and documentation on 2026-11-17. On 2026-11-18, a design review by Claude (Opus 5.5) flagged noisy healthy rows, inconsistent color tokens, a missing sticky table header, weak input boundaries, and decorative skeleton motion. The project dropped the generic gradient cards and chart, decorative motion, and client-side mock data. The later Claude-assisted redesign introduced the cinema-style floor map and PC details panel.
 
 An earlier read-only Codex review inspected polling, aggregates, simulation billing, filter semantics, keyboard targeting, and model configuration. This completion pass used personal Codex with `gpt-6.2-sol` at `ultra` reasoning (a final documentation wrap used `high`) to harden filter compilation and model validation, fix a stale-response race, strengthen snapshot and demo isolation, revise contrast, and extend verification. Executed checks and remaining gaps are listed in [VERIFICATION.md](VERIFICATION.md).
+
+
+## Spatial workshop and copilot
+
+See [Spatial workshop and PC control center](docs/spatial-workshop.md) for camera controls, keyboard/list fallback, stable seat mapping, mobile behavior and verification limits. See [Agent interface](docs/agent-interface.md) for the simulation-only conversation and action contract.
+
+The room is real runtime geometry, not a generated background image. It adds the Three.js dependency, but does not require an external 3D asset or account. No real Azure resource or personal computer is controlled.
