@@ -3,6 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { put, list, head, BlobNotFoundError } from "@vercel/blob";
 import { ReprovisionEvent } from "./replay";
+import { kvGet, kvList, kvPutNew, sqlConfigured } from "./sqlstore";
 
 // The simulation itself is derivable (lib/replay.ts), so the only state that
 // must survive a cold start is the session anchor and the operator's
@@ -71,7 +72,8 @@ interface Mem {
 let mem: Mem | null = null;
 let lastRefreshAt = 0;
 
-const useBlob = () => Boolean(process.env.BLOB_READ_WRITE_TOKEN);
+const usePg = () => sqlConfigured();
+const useBlob = () => !usePg() && Boolean(process.env.BLOB_READ_WRITE_TOKEN);
 
 function toPersisted(m: Mem): Persisted {
   return {
@@ -182,6 +184,56 @@ async function blobAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): 
   }
 }
 
+// ---------- Postgres backend (Neon) ----------
+
+async function pgReadAnchor(key = ANCHOR_PATH): Promise<number | null> {
+  const raw = (await kvGet(key)) as { sessionStartedAt?: number } | null;
+  return raw && typeof raw.sessionStartedAt === "number" ? raw.sessionStartedAt : null;
+}
+
+async function pgWriteAnchor(anchor: number, key = ANCHOR_PATH): Promise<number> {
+  // Concurrent first boots race: the unique key lets exactly one insert win and
+  // every loser adopts the stored anchor, so all instances replay one session.
+  await kvPutNew(key, { sessionStartedAt: anchor });
+  const stored = await pgReadAnchor(key);
+  if (stored === null) throw new Error("anchor write not visible");
+  return stored;
+}
+
+async function pgAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): Promise<string | null> {
+  const key = `${prefix}${ev.at}-${ev.id}-${randomUUID()}.json`;
+  try {
+    return (await kvPutNew(key, ev)) ? key : null;
+  } catch (err) {
+    console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+async function pgMerge(prefix: string, into: Map<string, ReprovisionEvent>): Promise<number> {
+  let added = 0;
+  for (const r of await kvList(prefix)) {
+    if (into.has(r.key)) continue;
+    if (validAction(r.body)) {
+      into.set(r.key, r.body);
+      added++;
+    }
+  }
+  return added;
+}
+
+async function pgRefresh(): Promise<number | null> {
+  const anchor = mem?.anchor ?? (await pgReadAnchor());
+  const actions = mem?.actions ?? new Map<string, ReprovisionEvent>();
+  const added = await pgMerge(ACTIONS_PREFIX, actions);
+  if (anchor !== null) {
+    mem = { anchor, actions };
+    lastRefreshAt = Date.now();
+  }
+  slog(`source=postgres actions=${actions.size} (+${added})`);
+  return anchor;
+}
+
 // ---------- File backend (local dev / tests) ----------
 
 function fileReadAnchor(filename = ANCHOR_FILE): number | null {
@@ -269,7 +321,7 @@ export async function loadPersisted(): Promise<Persisted | null> {
     return toPersisted(mem);
   }
   try {
-    const anchor = useBlob() ? await blobRefresh() : fileRefresh();
+    const anchor = usePg() ? await pgRefresh() : useBlob() ? await blobRefresh() : fileRefresh();
     if (anchor === null) return null; // first boot, store reachable
     return toPersisted(mem!);
   } catch (err) {
@@ -285,7 +337,7 @@ export async function loadPersisted(): Promise<Persisted | null> {
 // First boot: anchor the session. Returns the anchor actually in use, which
 // may be a concurrently booted instance's anchor.
 export async function saveAnchor(anchor: number): Promise<number> {
-  const adopted = useBlob() ? await blobWriteAnchor(anchor) : fileWriteAnchor(anchor);
+  const adopted = usePg() ? await pgWriteAnchor(anchor) : useBlob() ? await blobWriteAnchor(anchor) : fileWriteAnchor(anchor);
   mem = { anchor: adopted, actions: mem?.actions ?? new Map() };
   lastRefreshAt = Date.now();
   slog(`anchor=${adopted}`);
@@ -297,7 +349,7 @@ export async function saveAnchor(anchor: number): Promise<number> {
 // A successful append updates this instance's cache immediately, so the
 // same instance always reads its own write within the refresh window.
 export async function appendAction(ev: ReprovisionEvent): Promise<boolean> {
-  const key = useBlob() ? await blobAppendAction(ev) : fileAppendAction(ev);
+  const key = usePg() ? await pgAppendAction(ev) : useBlob() ? await blobAppendAction(ev) : fileAppendAction(ev);
   if (key === null) return false;
   mem?.actions.set(key, ev);
   slog(`appended actions=${mem?.actions.size ?? 1}`);
@@ -340,7 +392,8 @@ function demoPaths(id: string) {
 export async function createDemoSession(now = Date.now()) {
   const id = randomUUID();
   const { dir, prefix } = demoPaths(id);
-  if (useBlob()) await blobWriteAnchor(now, `${prefix}anchor.json`);
+  if (usePg()) await pgWriteAnchor(now, `${prefix}anchor.json`);
+  else if (useBlob()) await blobWriteAnchor(now, `${prefix}anchor.json`);
   else {
     fs.mkdirSync(path.join(dir, "actions"), { recursive: true });
     fs.writeFileSync(path.join(dir, "anchor.json"), JSON.stringify({ sessionStartedAt: now }), { flag: "wx" });
@@ -354,6 +407,7 @@ export async function createDemoSession(now = Date.now()) {
 export async function loadDemoSession(id: string, now: number): Promise<Persisted> {
   const { dir, prefix } = demoPaths(id);
   const isBlob = useBlob();
+  const isPg = usePg();
   const cached = demoMem.get(id);
   const finish = (anchor: number, actions: Map<string, ReprovisionEvent>): Persisted => {
     if (now >= anchor + DEMO_LIFETIME_MS) throw new DemoSessionError("demo_expired");
@@ -365,8 +419,14 @@ export async function loadDemoSession(id: string, now: number): Promise<Persiste
     return finish(cached.anchor, cached.actions);
   }
   try {
-    const anchor = isBlob ? await blobReadAnchor(`${prefix}anchor.json`) : fileReadAnchor(path.join(dir, "anchor.json"));
+    const anchor = isPg ? await pgReadAnchor(`${prefix}anchor.json`) : isBlob ? await blobReadAnchor(`${prefix}anchor.json`) : fileReadAnchor(path.join(dir, "anchor.json"));
     if (anchor === null) throw new DemoSessionError("demo_not_found");
+    if (isPg) {
+      const actions = cached?.actions ?? new Map<string, ReprovisionEvent>();
+      await pgMerge(`${prefix}actions/`, actions);
+      demoCacheSet(id, { anchor, actions, refreshedAt: Date.now() });
+      return finish(anchor, actions);
+    }
     if (isBlob) {
       // Merge by key: only actions written by OTHER instances are fetched;
       // keys already in the cache are never re-downloaded.
@@ -400,7 +460,7 @@ export async function loadDemoSession(id: string, now: number): Promise<Persiste
 
 export async function appendDemoAction(id: string, ev: ReprovisionEvent): Promise<boolean> {
   const { dir, prefix } = demoPaths(id);
-  const key = useBlob() ? await blobAppendAction(ev, `${prefix}actions/`) : fileAppendAction(ev, path.join(dir, "actions"));
+  const key = usePg() ? await pgAppendAction(ev, `${prefix}actions/`) : useBlob() ? await blobAppendAction(ev, `${prefix}actions/`) : fileAppendAction(ev, path.join(dir, "actions"));
   if (key === null) return false;
   // Same-instance read-after-write: the next cached load includes this action.
   const c = demoMem.get(id);
@@ -414,4 +474,4 @@ export function resetPersistenceCache() {
   mem = null;
   lastRefreshAt = 0;
   demoMem.clear();
-}
+      }
