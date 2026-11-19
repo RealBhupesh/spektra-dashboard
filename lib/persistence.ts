@@ -61,6 +61,27 @@ const REFRESH_TTL_MS = Number.isFinite(configuredTtl) && configuredTtl > 0 ? con
 
 // Generated once per serverless process. Runtime logs carry it so a request
 // served by a fresh process (cold start) is distinguishable in the logs.
+// Tri-state result of a durable append attempt. "conflict" means the
+// idempotency key already exists: a concurrent request already appended a
+// restart of the same environment decided from the same observed state, and
+// its event won. The caller reloads fresh state and reports a truthful skip
+// instead of double-appending.
+export type AppendOutcome = "saved" | "conflict" | "error";
+
+// Idempotency key: one restart of a given environment per TARGET-SPECIFIC
+// observed epoch - the number of prior reprovision events for that
+// environment in the caller's observed log. Two concurrent restarts of the
+// same environment decided from the same per-target history share one key
+// even when their cached GLOBAL log lengths differ (unrelated events for
+// other environments do not change the key), so exactly one wins the store
+// and the loser sees "conflict". A later, legitimate re-restart observes
+// the earlier restart in the log, so its key always differs.
+//
+// The epoch is counted from stored event VALUES, never parsed from keys, so
+// event files written under the legacy `<at>-<id>-<uuid>.json` naming count
+// the same as new-format keys, and the two key shapes can never collide.
+const actionKey = (ev: ReprovisionEvent, targetEpoch: number) => `${ev.id}-r${targetEpoch}.json`;
+
 const INSTANCE_ID = randomUUID().slice(0, 8);
 const slog = (msg: string) => console.log(`[persistence] instance=${INSTANCE_ID} ${msg}`);
 
@@ -164,11 +185,8 @@ async function blobWriteAnchor(anchor: number, pathname = ANCHOR_PATH): Promise<
   }
 }
 
-// Returns the storage key written, or null when the action was NOT saved.
-// Callers update their own caches with the key and must fail the request
-// visibly on null instead of reporting an ephemeral change.
-async function blobAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): Promise<string | null> {
-  const key = `${prefix}${ev.at}-${ev.id}-${randomUUID()}.json`;
+async function blobAppendAction(ev: ReprovisionEvent, targetEpoch: number, prefix = ACTIONS_PREFIX): Promise<{ outcome: AppendOutcome; key: string }> {
+  const key = `${prefix}${actionKey(ev, targetEpoch)}`;
   try {
     await put(key, JSON.stringify(ev), {
       access: "private",
@@ -177,10 +195,18 @@ async function blobAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): 
       contentType: "application/json",
       token: process.env.BLOB_READ_WRITE_TOKEN,
     });
-    return key;
+    return { outcome: "saved", key };
   } catch (err) {
-    console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
-    return null;
+    // The SDK exposes no typed already-exists error (verified against the
+    // installed @vercel/blob): probe the key to tell a lost race apart from
+    // a real failure.
+    try {
+      await head(key, { token: process.env.BLOB_READ_WRITE_TOKEN });
+      return { outcome: "conflict", key };
+    } catch {
+      console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
+      return { outcome: "error", key };
+    }
   }
 }
 
@@ -200,13 +226,14 @@ async function pgWriteAnchor(anchor: number, key = ANCHOR_PATH): Promise<number>
   return stored;
 }
 
-async function pgAppendAction(ev: ReprovisionEvent, prefix = ACTIONS_PREFIX): Promise<string | null> {
-  const key = `${prefix}${ev.at}-${ev.id}-${randomUUID()}.json`;
+async function pgAppendAction(ev: ReprovisionEvent, targetEpoch: number, prefix = ACTIONS_PREFIX): Promise<{ outcome: AppendOutcome; key: string }> {
+  const key = `${prefix}${actionKey(ev, targetEpoch)}`;
   try {
-    return (await kvPutNew(key, ev)) ? key : null;
+    // kvPutNew inserts ON CONFLICT DO NOTHING: false means the key is taken.
+    return { outcome: (await kvPutNew(key, ev)) ? "saved" : "conflict", key };
   } catch (err) {
     console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
-    return null;
+    return { outcome: "error", key };
   }
 }
 
@@ -295,18 +322,22 @@ function fileWriteAnchor(anchor: number): number {
   }
 }
 
-function fileAppendAction(ev: ReprovisionEvent, dir = ACTIONS_DIR): string | null {
-  const key = `${ev.at}-${ev.id}-${randomUUID()}.json`;
-  const pending = path.join(dir, `${key}.tmp`);
+function fileAppendAction(ev: ReprovisionEvent, targetEpoch: number, dir = ACTIONS_DIR): { outcome: AppendOutcome; key: string } {
+  const key = actionKey(ev, targetEpoch);
+  const pending = path.join(dir, `${key}-${randomUUID()}.tmp`);
   try {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(pending, JSON.stringify(ev), { flag: "wx" });
-    fs.renameSync(pending, path.join(dir, key));
-    return key;
+    // link (not rename) fails with EEXIST when the key is already taken, so
+    // a lost race never overwrites the winner's event.
+    fs.linkSync(pending, path.join(dir, key));
+    return { outcome: "saved", key };
   } catch (err) {
-    try { fs.rmSync(pending, { force: true }); } catch { /* preserve the original failure */ }
+    if ((err as NodeJS.ErrnoException).code === "EEXIST") return { outcome: "conflict", key };
     console.error(`[persistence] instance=${INSTANCE_ID} append failed:`, err instanceof Error ? err.message : err);
-    return null;
+    return { outcome: "error", key };
+  } finally {
+    fs.rmSync(pending, { force: true });
   }
 }
 
@@ -344,16 +375,28 @@ export async function saveAnchor(anchor: number): Promise<number> {
   return adopted;
 }
 
-// Append one reprovision action. False means the action was NOT saved;
-// callers must fail the request visibly instead of reporting a saved change.
-// A successful append updates this instance's cache immediately, so the
-// same instance always reads its own write within the refresh window.
-export async function appendAction(ev: ReprovisionEvent): Promise<boolean> {
-  const key = usePg() ? await pgAppendAction(ev) : useBlob() ? await blobAppendAction(ev) : fileAppendAction(ev);
-  if (key === null) return false;
+// Append one reprovision action, keyed by the caller's observed per-target
+// epoch (prior restart count for ev.id) - see actionKey. "error" means the
+// action was NOT saved; callers must fail the request visibly instead of
+// reporting a saved change. "conflict" means a concurrent request won this
+// key; callers reload fresh state (loadPersistedFresh / loadDemoSessionFresh)
+// and report a skip. A successful append updates this instance's cache
+// immediately, so the same instance always reads its own write within the
+// refresh window.
+export async function appendAction(ev: ReprovisionEvent, targetEpoch: number): Promise<AppendOutcome> {
+  const { outcome, key } = usePg() ? await pgAppendAction(ev, targetEpoch) : useBlob() ? await blobAppendAction(ev, targetEpoch) : fileAppendAction(ev, targetEpoch);
+  if (outcome !== "saved") return outcome;
   mem?.actions.set(key, ev);
   slog(`appended actions=${mem?.actions.size ?? 1}`);
-  return true;
+  return "saved";
+}
+
+// After a conflicting append, the winning event sits in the shared store but
+// may be inside this instance's refresh window. Bypass the TTL once so the
+// caller answers from the true log.
+export async function loadPersistedFresh(): Promise<Persisted | null> {
+  lastRefreshAt = 0;
+  return loadPersisted();
 }
 
 // ---------- Isolated demo sessions ----------
@@ -458,15 +501,22 @@ export async function loadDemoSession(id: string, now: number): Promise<Persiste
   }
 }
 
-export async function appendDemoAction(id: string, ev: ReprovisionEvent): Promise<boolean> {
+export async function appendDemoAction(id: string, ev: ReprovisionEvent, targetEpoch: number): Promise<AppendOutcome> {
   const { dir, prefix } = demoPaths(id);
-  const key = usePg() ? await pgAppendAction(ev, `${prefix}actions/`) : useBlob() ? await blobAppendAction(ev, `${prefix}actions/`) : fileAppendAction(ev, path.join(dir, "actions"));
-  if (key === null) return false;
+  const { outcome, key } = usePg() ? await pgAppendAction(ev, targetEpoch, `${prefix}actions/`) : useBlob() ? await blobAppendAction(ev, targetEpoch, `${prefix}actions/`) : fileAppendAction(ev, targetEpoch, path.join(dir, "actions"));
+  if (outcome !== "saved") return outcome;
   // Same-instance read-after-write: the next cached load includes this action.
   const c = demoMem.get(id);
   if (c) c.actions.set(key, ev);
   slog(`appended demo=${id.slice(0, 8)} actions=${c?.actions.size ?? 1}`);
-  return true;
+  return "saved";
+}
+
+// Demo-session counterpart of loadPersistedFresh.
+export async function loadDemoSessionFresh(id: string, now: number): Promise<Persisted> {
+  const cached = demoMem.get(id);
+  if (cached) cached.refreshedAt = 0;
+  return loadDemoSession(id, now);
 }
 
 // Test hook: drop the in-memory copies so the next load re-reads the backend.

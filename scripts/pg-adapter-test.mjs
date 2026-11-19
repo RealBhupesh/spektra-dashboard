@@ -32,16 +32,29 @@ const anchor = a1;
 P.resetPersistenceCache();
 ok("a fresh instance reads the same anchor", (await P.loadPersisted())?.sessionStartedAt === anchor);
 
-ok("append returns true", (await P.appendAction(ev("env-1", 10))) === true);
+ok("append saves", (await P.appendAction(ev("env-1", 10), 0)) === "saved");
 P.resetPersistenceCache();
 let l = await P.loadPersisted();
 ok("action survives instance loss (durable) and is visible to another instance", l.reprovisionLog.length === 1 && l.reprovisionLog[0].id === "env-1");
-const res = await Promise.all([P.appendAction(ev("env-2", 20)), P.appendAction(ev("env-2", 20)), P.appendAction(ev("env-3", 20))]);
-ok("concurrent appends all succeed", res.every(Boolean));
+// Unique-key conflict fixture: two in-flight appends of the SAME env at the
+// SAME per-target epoch hit the real unique constraint - exactly one saved.
+const res = await Promise.all([P.appendAction(ev("env-2", 20), 0), P.appendAction(ev("env-2", 20), 0), P.appendAction(ev("env-3", 20), 0)]);
+ok("concurrent same-target same-epoch appends: exactly one saved, one conflict", res[2] === "saved" && res.slice(0, 2).sort().join(",") === "conflict,saved", res.join(","));
 P.resetPersistenceCache();
 l = await P.loadPersisted();
-ok("no lost update: 4 actions stored (two for env-2 are distinct keys)", l.reprovisionLog.length === 4, String(l.reprovisionLog.length));
+ok("no lost update: 3 actions stored (the duplicate env-2 append conflicted)", l.reprovisionLog.length === 3, String(l.reprovisionLog.length));
 ok("log is ordered by time", l.reprovisionLog.every((e, i, a) => i === 0 || a[i - 1].at <= e.at));
+ok("legitimate re-restart uses the next per-target epoch", (await P.appendAction(ev("env-2", 25), 1)) === "saved");
+ok("same re-restart epoch conflicts on retry", (await P.appendAction(ev("env-2", 26), 1)) === "conflict");
+// Legacy filename compatibility: an event written under the pre-idempotency
+// <at>-<id>-<uuid>.json naming merges from its VALUE, raises the log length,
+// and does not collide with or shift new-format per-target epoch keys.
+const legacyKey = "cloudlabs-ops/actions/1795000000000-env-4-3fa21c4a-9b2e-4c8a-8f1d-2e6b5a9c7d3e.json";
+ok("legacy-named event can be inserted", (await S.kvPutNew(legacyKey, ev("env-4", 15))) === true);
+P.resetPersistenceCache();
+l = await P.loadPersisted();
+ok("legacy-named event merges from its value", l.reprovisionLog.length === 5 && l.reprovisionLog.some((e) => e.id === "env-4"), String(l.reprovisionLog.length));
+ok("post-legacy epoch-1 append of env-4 saves under a non-colliding key", (await P.appendAction(ev("env-4", 30), 1)) === "saved");
 ok("kvPutNew never overwrites an existing key", (await S.kvPutNew("t/k", { a: 1 })) === true && (await S.kvPutNew("t/k", { a: 2 })) === false && (await S.kvGet("t/k")).a === 1);
 ok("kvList is prefix-exact", (await S.kvList("t/")).length === 1 && (await S.kvList("tt/")).length === 0);
 
@@ -49,10 +62,11 @@ ok("kvList is prefix-exact", (await S.kvList("t/")).length === 1 && (await S.kvL
 const now = Date.now();
 const d = await P.createDemoSession(now);
 ok("demo session created", typeof d.id === "string");
-ok("demo append ok", (await P.appendDemoAction(d.id, ev("env-9", now + 5))) === true);
+ok("demo append saves", (await P.appendDemoAction(d.id, ev("env-9", now + 5), 0)) === "saved");
+ok("demo same-target same-epoch append conflicts", (await P.appendDemoAction(d.id, ev("env-9", now + 6), 0)) === "conflict");
 P.resetPersistenceCache();
 const dl = await P.loadDemoSession(d.id, now + 10);
-ok("demo state durable across instances", dl.reprovisionLog.length === 1 && dl.sessionStartedAt === now);
+ok("demo state durable across instances (conflicted duplicate not stored)", dl.reprovisionLog.length === 1 && dl.sessionStartedAt === now);
 ok("demo is isolated from the shared session", (await P.loadPersisted()).reprovisionLog.every((e) => e.id !== "env-9"));
 let err = null;
 try { await P.loadDemoSession("11111111-1111-4111-8111-111111111111", now); } catch (e) { err = e; }
@@ -68,7 +82,7 @@ ok("malformed demo id rejected before any query", err?.code === "demo_not_found"
 const dir = mkdtempSync(path.join(tmpdir(), "pgl-"));
 const child = (code) => execFileSync(process.execPath, ["-e", code], { cwd: root, env: { ...process.env, SQL_DRIVER: "pglite", PGLITE_DIR: dir } }).toString().trim();
 const pre = `const P=require(${JSON.stringify(path.join(out, "persistence.js"))});`;
-child(pre + "(async()=>{await P.saveAnchor(777);await P.appendAction({id:'env-5',at:5,kind:'reprovision'});process.exit(0)})()");
+child(pre + "(async()=>{await P.saveAnchor(777);await P.appendAction({id:'env-5',at:5,kind:'reprovision'}, 0);process.exit(0)})()");
 const back = child(pre + "(async()=>{const l=await P.loadPersisted();console.log(JSON.stringify([l.sessionStartedAt,l.reprovisionLog.length]));process.exit(0)})()");
 ok("anchor and action survive a full process restart", back.split("\n").pop() === "[777,1]", back);
 rmSync(dir, { recursive: true, force: true });

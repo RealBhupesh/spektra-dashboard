@@ -1,0 +1,11 @@
+import {chromium} from 'playwright';
+const browser=await chromium.launch({executablePath:'/usr/bin/google-chrome-stable',args:['--no-sandbox','--enable-webgl','--use-angle=swiftshader','--enable-unsafe-swiftshader']});
+const page=await browser.newPage({viewport:{width:1440,height:1050},deviceScaleFactor:1,reducedMotion:'reduce'});
+page.on('pageerror',e=>console.log('PAGEERROR',e.message));
+await page.goto('http://localhost:3000');await page.waitForSelector('canvas');await page.waitForTimeout(1500);
+await page.evaluate(()=>scrollTo(0,0));await page.screenshot({path:'/downloads/spektra-working-overview.png',fullPage:true});
+await page.getByRole('button',{name:'Browse seats'}).click();await page.locator('.seat-browser button[data-env-id="env-002"]').click();await page.waitForTimeout(1500);await page.getByRole('button',{name:'Browse seats'}).click();
+await page.evaluate(()=>scrollTo(0,0));await page.waitForTimeout(500);await page.screenshot({path:'/downloads/spektra-working-focus.png',fullPage:true});
+await page.setViewportSize({width:390,height:844});await page.getByRole('button',{name:'Close details'}).click();await page.waitForTimeout(1500);await page.evaluate(()=>scrollTo(0,0));await page.waitForTimeout(500);await page.screenshot({path:'/downloads/spektra-working-mobile.png',fullPage:true});
+console.log('mobile overflow',await page.evaluate(()=>({page:document.documentElement.scrollWidth,view:innerWidth})));
+await browser.close();
