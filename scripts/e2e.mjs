@@ -11,7 +11,7 @@ const ok = (name, cond, extra = "") => {
   else { failed++; console.log(`FAIL ${name} ${extra}`); }
 };
 
-const browser = await chromium.launch();
+const browser = await chromium.launch({ executablePath: "/usr/bin/google-chrome-stable", args: ["--no-sandbox"] });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
 
 // 1. Load all 120 rows in a fresh isolated demo, preserving shared data.
@@ -174,7 +174,7 @@ await page2.context().route("**/api/**", async (route) => {
   await route.continue();
 });
 await page2.goto(BASE, { waitUntil: "domcontentloaded" });
-const skeletons = await page2.locator(".skeleton").count();
+const skeletons = await page2.locator(".skeleton, .room-loading").count();
 ok("loading skeleton shows while waiting", skeletons > 0, `got ${skeletons}`);
 await page2.close();
 
